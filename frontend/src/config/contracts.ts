@@ -114,12 +114,27 @@ export const VAULT_ABI = [
   { inputs: [], name: "unstakedBalance", outputs: [{ name: "", type: "uint256" }], stateMutability: "view", type: "function" },
   { inputs: [{ name: "token", type: "address" }], name: "claimableYield", outputs: [{ name: "", type: "uint256" }], stateMutability: "view", type: "function" },
   { inputs: [], name: "getRewardTokens", outputs: [{ name: "", type: "address[]" }], stateMutability: "view", type: "function" },
-  // Write
+  // Auto-claim view
+  { inputs: [], name: "autoClaimEnabled", outputs: [{ name: "", type: "bool" }], stateMutability: "view", type: "function" },
+  { inputs: [], name: "claimInterval", outputs: [{ name: "", type: "uint256" }], stateMutability: "view", type: "function" },
+  { inputs: [], name: "lastClaimAt", outputs: [{ name: "", type: "uint256" }], stateMutability: "view", type: "function" },
+  { inputs: [], name: "nextClaimAt", outputs: [{ name: "", type: "uint256" }], stateMutability: "view", type: "function" },
+  { inputs: [], name: "gasRefund", outputs: [{ name: "", type: "uint256" }], stateMutability: "view", type: "function" },
+  { inputs: [], name: "avaxBalance", outputs: [{ name: "", type: "uint256" }], stateMutability: "view", type: "function" },
+  { inputs: [{ name: "", type: "bytes" }], name: "checkUpkeep", outputs: [{ name: "upkeepNeeded", type: "bool" }, { name: "", type: "bytes" }], stateMutability: "view", type: "function" },
+  // Write – staking
   { inputs: [], name: "stakeAll", outputs: [], stateMutability: "nonpayable", type: "function" },
   { inputs: [{ name: "amount", type: "uint256" }], name: "stake", outputs: [], stateMutability: "nonpayable", type: "function" },
   { inputs: [], name: "unstakeAll", outputs: [], stateMutability: "nonpayable", type: "function" },
   { inputs: [{ name: "amount", type: "uint256" }], name: "unstake", outputs: [], stateMutability: "nonpayable", type: "function" },
   { inputs: [], name: "claimYield", outputs: [], stateMutability: "nonpayable", type: "function" },
+  // Write – auto-claim
+  { inputs: [], name: "autoClaimYield", outputs: [], stateMutability: "nonpayable", type: "function" },
+  { inputs: [{ name: "enabled", type: "bool" }], name: "setAutoClaimEnabled", outputs: [], stateMutability: "nonpayable", type: "function" },
+  { inputs: [{ name: "interval", type: "uint256" }], name: "setClaimInterval", outputs: [], stateMutability: "nonpayable", type: "function" },
+  { inputs: [{ name: "amount", type: "uint256" }], name: "setGasRefund", outputs: [], stateMutability: "nonpayable", type: "function" },
+  { inputs: [{ name: "amount", type: "uint256" }, { name: "to", type: "address" }], name: "withdrawAvax", outputs: [], stateMutability: "nonpayable", type: "function" },
+  // Write – config
   { inputs: [{ name: "newController", type: "address" }], name: "setController", outputs: [], stateMutability: "nonpayable", type: "function" },
   { inputs: [{ name: "newReceiver", type: "address" }], name: "setYieldReceiver", outputs: [], stateMutability: "nonpayable", type: "function" },
   { inputs: [{ name: "token", type: "address" }, { name: "amount", type: "uint256" }, { name: "to", type: "address" }], name: "rescueToken", outputs: [], stateMutability: "nonpayable", type: "function" },

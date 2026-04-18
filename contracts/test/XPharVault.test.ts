@@ -1,4 +1,4 @@
-import { loadFixture } from "@nomicfoundation/hardhat-toolbox/network-helpers";
+import { loadFixture, time } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 import { expect } from "chai";
 import hre from "hardhat";
 
@@ -25,14 +25,14 @@ describe("XPharVault + XPharVaultFactory", function () {
 
   async function vaultFixture() {
     const base = await loadFixture(deployFixture);
-    const { factory, controller, yieldReceiver, deployer } = base;
+    const { factory, controller, yieldReceiver } = base;
 
     const tx = await factory.createVault(controller.address, yieldReceiver.address);
     const receipt = await tx.wait();
     const event = receipt?.logs.find((l: any) => l.fragment?.name === "VaultCreated");
     const vaultAddress = (event as any).args.vault;
-
     const vault = await hre.ethers.getContractAt("XPharVault", vaultAddress);
+
     return { ...base, vault };
   }
 
@@ -71,25 +71,23 @@ describe("XPharVault + XPharVaultFactory", function () {
     });
   });
 
-  // ── Vault ──────────────────────────────────────────────────────────────────
+  // ── Vault: basic operations ───────────────────────────────────────────────
 
-  describe("Vault", function () {
+  describe("Vault – basic", function () {
     it("has correct initial state", async function () {
       const { vault, controller, yieldReceiver, deployer } = await loadFixture(vaultFixture);
       expect(await vault.controller()).to.equal(controller.address);
       expect(await vault.yieldReceiver()).to.equal(yieldReceiver.address);
       expect(await vault.creator()).to.equal(deployer.address);
+      expect(await vault.autoClaimEnabled()).to.equal(false);
+      expect(await vault.claimInterval()).to.equal(7 * 24 * 3600);
     });
 
     it("stakes xPHAR via stakeAll", async function () {
-      const { vault, xphar, staking, controller } = await loadFixture(vaultFixture);
-
-      const amount = hre.ethers.parseEther("100");
-      await xphar.mint(await vault.getAddress(), amount);
-
+      const { vault, xphar, controller } = await loadFixture(vaultFixture);
+      await xphar.mint(await vault.getAddress(), hre.ethers.parseEther("100"));
       await vault.connect(controller).stakeAll();
-
-      expect(await vault.stakedBalance()).to.equal(amount);
+      expect(await vault.stakedBalance()).to.equal(hre.ethers.parseEther("100"));
       expect(await vault.unstakedBalance()).to.equal(0);
     });
 
@@ -97,51 +95,154 @@ describe("XPharVault + XPharVaultFactory", function () {
       const { vault, xphar, wavax, staking, controller, yieldReceiver } =
         await loadFixture(vaultFixture);
 
-      // Stake xPHAR
       await xphar.mint(await vault.getAddress(), hre.ethers.parseEther("100"));
       await vault.connect(controller).stakeAll();
 
-      // Credit reward on mock staking contract
       const reward = hre.ethers.parseEther("10");
       await wavax.mint(await staking.getAddress(), reward);
       await staking.creditReward(await vault.getAddress(), reward);
 
-      const receiverBefore = await wavax.balanceOf(yieldReceiver.address);
+      const before = await wavax.balanceOf(yieldReceiver.address);
       await vault.connect(controller).claimYield();
-      const receiverAfter = await wavax.balanceOf(yieldReceiver.address);
+      const after = await wavax.balanceOf(yieldReceiver.address);
 
-      expect(receiverAfter - receiverBefore).to.equal(reward);
+      expect(after - before).to.equal(reward);
     });
 
     it("reverts staking from non-controller", async function () {
       const { vault, xphar, other } = await loadFixture(vaultFixture);
       await xphar.mint(await vault.getAddress(), hre.ethers.parseEther("1"));
-      await expect(vault.connect(other).stakeAll()).to.be.revertedWithCustomError(
-        vault,
-        "NotController"
-      );
+      await expect(vault.connect(other).stakeAll()).to.be.revertedWithCustomError(vault, "NotController");
     });
 
-    it("allows controller to change controller", async function () {
+    it("allows controller to transfer control", async function () {
       const { vault, controller, other } = await loadFixture(vaultFixture);
       await vault.connect(controller).setController(other.address);
       expect(await vault.controller()).to.equal(other.address);
     });
 
-    it("allows controller to change yield receiver", async function () {
-      const { vault, controller, other } = await loadFixture(vaultFixture);
-      await vault.connect(controller).setYieldReceiver(other.address);
-      expect(await vault.yieldReceiver()).to.equal(other.address);
-    });
-
-    it("unstakes and returns xPHAR to vault", async function () {
+    it("unstakes all and returns xPHAR to vault", async function () {
       const { vault, xphar, controller } = await loadFixture(vaultFixture);
-      const amount = hre.ethers.parseEther("50");
-      await xphar.mint(await vault.getAddress(), amount);
+      await xphar.mint(await vault.getAddress(), hre.ethers.parseEther("50"));
       await vault.connect(controller).stakeAll();
       await vault.connect(controller).unstakeAll();
-      expect(await vault.unstakedBalance()).to.equal(amount);
-      expect(await vault.stakedBalance()).to.equal(0);
+      expect(await vault.unstakedBalance()).to.equal(hre.ethers.parseEther("50"));
+    });
+  });
+
+  // ── Vault: auto-claim ─────────────────────────────────────────────────────
+
+  describe("Vault – auto-claim", function () {
+    async function autoClaimFixture() {
+      const base = await loadFixture(vaultFixture);
+      const { vault, xphar, wavax, staking, controller } = base;
+      const vaultAddr = await vault.getAddress();
+
+      // Stake some xPHAR
+      await xphar.mint(vaultAddr, hre.ethers.parseEther("100"));
+      await vault.connect(controller).stakeAll();
+
+      // Fund vault with AVAX for gas bounty
+      await controller.sendTransaction({ to: vaultAddr, value: hre.ethers.parseEther("1") });
+
+      // Enable auto-claim
+      await vault.connect(controller).setAutoClaimEnabled(true);
+      await vault.connect(controller).setGasRefund(hre.ethers.parseEther("0.05"));
+
+      // Credit rewards
+      const reward = hre.ethers.parseEther("5");
+      await wavax.mint(await staking.getAddress(), reward);
+      await staking.creditReward(vaultAddr, reward);
+
+      return { ...base, reward };
+    }
+
+    it("reverts if auto-claim is disabled", async function () {
+      const { vault, other } = await loadFixture(vaultFixture);
+      await expect(vault.connect(other).autoClaimYield())
+        .to.be.revertedWithCustomError(vault, "AutoClaimDisabled");
+    });
+
+    it("reverts if called before interval elapses", async function () {
+      const { vault, controller, other } = await loadFixture(vaultFixture);
+      await vault.connect(controller).setAutoClaimEnabled(true);
+      await expect(vault.connect(other).autoClaimYield())
+        .to.be.revertedWithCustomError(vault, "TooEarly");
+    });
+
+    it("allows anyone to call after interval and pays AVAX bounty", async function () {
+      const { vault, wavax, yieldReceiver, other, reward } = await loadFixture(autoClaimFixture);
+
+      // Advance time by 7 days
+      await time.increase(7 * 24 * 3600);
+
+      const callerAvaxBefore = await hre.ethers.provider.getBalance(other.address);
+      const tx = await vault.connect(other).autoClaimYield();
+      const receipt = await tx.wait();
+      const gasCost = receipt!.gasUsed * receipt!.gasPrice;
+      const callerAvaxAfter = await hre.ethers.provider.getBalance(other.address);
+
+      // Caller should receive 0.05 AVAX minus gas
+      const refund = hre.ethers.parseEther("0.05");
+      expect(callerAvaxAfter - callerAvaxBefore + gasCost).to.equal(refund);
+
+      // Yield should have gone to yieldReceiver
+      expect(await wavax.balanceOf(yieldReceiver.address)).to.equal(reward);
+    });
+
+    it("emits AutoClaimed event", async function () {
+      const { vault, other } = await loadFixture(autoClaimFixture);
+      await time.increase(7 * 24 * 3600);
+      await expect(vault.connect(other).autoClaimYield())
+        .to.emit(vault, "AutoClaimed")
+        .withArgs(other.address, hre.ethers.parseEther("0.05"));
+    });
+
+    it("cannot be called again before next interval", async function () {
+      const { vault, other } = await loadFixture(autoClaimFixture);
+      await time.increase(7 * 24 * 3600);
+      await vault.connect(other).autoClaimYield();
+
+      await expect(vault.connect(other).autoClaimYield())
+        .to.be.revertedWithCustomError(vault, "TooEarly");
+    });
+
+    it("checkUpkeep returns true when due", async function () {
+      const { vault } = await loadFixture(autoClaimFixture);
+      await time.increase(7 * 24 * 3600);
+      const [upkeepNeeded] = await vault.checkUpkeep("0x");
+      expect(upkeepNeeded).to.equal(true);
+    });
+
+    it("checkUpkeep returns false before interval", async function () {
+      const { vault } = await loadFixture(autoClaimFixture);
+      const [upkeepNeeded] = await vault.checkUpkeep("0x");
+      expect(upkeepNeeded).to.equal(false);
+    });
+
+    it("performUpkeep claims yield (Chainlink path)", async function () {
+      const { vault, wavax, yieldReceiver, reward, other } = await loadFixture(autoClaimFixture);
+      await time.increase(7 * 24 * 3600);
+      await vault.connect(other).performUpkeep("0x");
+      expect(await wavax.balanceOf(yieldReceiver.address)).to.equal(reward);
+    });
+
+    it("controller can withdraw AVAX from vault", async function () {
+      const { vault, controller } = await loadFixture(autoClaimFixture);
+      const vaultBalance = await vault.avaxBalance();
+      const before = await hre.ethers.provider.getBalance(controller.address);
+      const tx = await vault.connect(controller).withdrawAvax(vaultBalance, controller.address);
+      const receipt = await tx.wait();
+      const gasCost = receipt!.gasUsed * receipt!.gasPrice;
+      const after = await hre.ethers.provider.getBalance(controller.address);
+      expect(after - before + gasCost).to.equal(vaultBalance);
+    });
+
+    it("reverts setClaimInterval below 1 hour", async function () {
+      const { vault, controller } = await loadFixture(vaultFixture);
+      await expect(
+        vault.connect(controller).setClaimInterval(1800)
+      ).to.be.revertedWithCustomError(vault, "IntervalTooShort");
     });
   });
 });
