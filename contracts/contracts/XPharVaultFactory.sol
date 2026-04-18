@@ -3,14 +3,23 @@ pragma solidity ^0.8.24;
 
 import {XPharVault} from "./XPharVault.sol";
 
-/// @notice Factory that deploys and tracks XPharVault instances.
-///         Each vault stakes xPHAR on Pharaoh Exchange and forwards yield
-///         to a designated beneficiary wallet, controlled by a trustee.
+/// @notice Factory that deploys and tracks XPharVault instances for Pharaoh V3.
+///
+/// ── xPHAR transfer restriction note ─────────────────────────────────────────
+/// xPHAR is non-transferable by default. Each vault address must be added to
+/// Pharaoh's exemptTo whitelist before users can send xPHAR to it.
+/// The factory owner should request batch whitelisting from the Pharaoh team:
+///   Discord: discord.gg/Pharaoh
+///   Docs:    docs.pharaoh.exchange
+///
+/// Alternatively users can send PHAR to the vault and call convertPharToXPhar()
+/// (note: 50% of PHAR input is burned by the Pharaoh protocol on that path).
 contract XPharVaultFactory {
-    // ── Immutable protocol addresses ──────────────────────────────────────────
+    // ── Protocol addresses (Pharaoh V3 on Avalanche C-Chain) ─────────────────
     address public immutable xphar;
-    address public immutable staking;
-    address[] public defaultRewardTokens;
+    address public immutable phar;
+    address public immutable voteModule;
+    address public immutable voter;
 
     // ── Registry ──────────────────────────────────────────────────────────────
     VaultInfo[] public vaults;
@@ -39,19 +48,23 @@ contract XPharVaultFactory {
 
     constructor(
         address _xphar,
-        address _staking,
-        address[] memory _defaultRewardTokens
+        address _phar,
+        address _voteModule,
+        address _voter
     ) {
-        if (_xphar == address(0) || _staking == address(0)) revert ZeroAddress();
+        if (_xphar == address(0) || _phar == address(0)) revert ZeroAddress();
+        if (_voteModule == address(0) || _voter == address(0)) revert ZeroAddress();
         xphar = _xphar;
-        staking = _staking;
-        defaultRewardTokens = _defaultRewardTokens;
+        phar = _phar;
+        voteModule = _voteModule;
+        voter = _voter;
     }
 
-    /// @notice Deploy a new XPharVault
-    /// @param controller  The trustee wallet that manages vault operations
-    /// @param yieldReceiver  The beneficiary wallet that receives all claimed yield
-    /// @return vault  Address of the newly deployed vault
+    /// @notice Deploy a new XPharVault.
+    /// @param controller    The trustee wallet that manages vault operations
+    ///                      (stakes, votes, claims). Can be the same as creator.
+    /// @param yieldReceiver The beneficiary wallet that receives all claimed yield.
+    ///                      Can be any address — completely separate from controller.
     function createVault(
         address controller,
         address yieldReceiver
@@ -60,10 +73,11 @@ contract XPharVaultFactory {
 
         XPharVault newVault = new XPharVault(
             xphar,
-            staking,
+            phar,
+            voteModule,
+            voter,
             controller,
             yieldReceiver,
-            defaultRewardTokens,
             msg.sender
         );
 
@@ -79,7 +93,6 @@ contract XPharVaultFactory {
         vaultIdsByCreator[msg.sender].push(vaultId);
 
         emit VaultCreated(vaultId, address(newVault), msg.sender, controller, yieldReceiver);
-
         return address(newVault);
     }
 
@@ -100,22 +113,14 @@ contract XPharVaultFactory {
     function getVaultsByController(address controller) external view returns (VaultInfo[] memory) {
         uint256[] memory ids = vaultIdsByController[controller];
         VaultInfo[] memory result = new VaultInfo[](ids.length);
-        for (uint256 i = 0; i < ids.length; i++) {
-            result[i] = vaults[ids[i]];
-        }
+        for (uint256 i = 0; i < ids.length; i++) result[i] = vaults[ids[i]];
         return result;
     }
 
     function getVaultsByCreator(address creator) external view returns (VaultInfo[] memory) {
         uint256[] memory ids = vaultIdsByCreator[creator];
         VaultInfo[] memory result = new VaultInfo[](ids.length);
-        for (uint256 i = 0; i < ids.length; i++) {
-            result[i] = vaults[ids[i]];
-        }
+        for (uint256 i = 0; i < ids.length; i++) result[i] = vaults[ids[i]];
         return result;
-    }
-
-    function getDefaultRewardTokens() external view returns (address[] memory) {
-        return defaultRewardTokens;
     }
 }
