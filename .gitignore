@@ -1,0 +1,22 @@
+# Env
+.env
+.env.local
+.env.*.local
+
+# Node
+node_modules/
+contracts/node_modules/
+frontend/node_modules/
+
+# Hardhat
+contracts/artifacts/
+contracts/cache/
+contracts/typechain-types/
+
+# Next.js
+frontend/.next/
+frontend/out/
+
+# Misc
+.DS_Store
+*.log
