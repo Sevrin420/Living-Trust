@@ -4,39 +4,35 @@ pragma solidity ^0.8.24;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {IXPhar} from "./interfaces/IXPhar.sol";
-import {IVoteModule} from "./interfaces/IVoteModule.sol";
-import {IVoter} from "./interfaces/IVoter.sol";
+import {IP33} from "./interfaces/IP33.sol";
 
-/// @notice A living trust vault for Pharaoh Exchange V3 xPHAR.
+/// @notice A living trust vault that holds P33 shares (Pharaoh's auto-compounding
+///         xPHAR vault), tracks the initial xPHAR principal, and each month
+///         withdraws only the appreciation above that principal to a designated
+///         beneficiary wallet.
+///
+/// ── Why P33? ──────────────────────────────────────────────────────────────────
+///  P33 auto-votes each epoch and compounds all voting rewards back into xPHAR.
+///  The xPHAR-per-share ratio increases over time. The vault skims the gain.
 ///
 /// ── Flow ──────────────────────────────────────────────────────────────────────
-///  1. Vault receives xPHAR (requires Pharaoh exemptTo whitelist) or PHAR.
-///  2. Controller calls stake() → deposits xPHAR into VoteModule.
-///  3. Each epoch (~weekly) controller calls vote() → casts votes for pools.
-///  4. Controller calls claimYield() → claims trading fees from voted pools
-///     via Voter.claimIncentives() and forwards all tokens to yieldReceiver.
+///  1. User deposits xPHAR → P33 (standard ERC4626) → receives P33 shares.
+///     (P33 shares are a normal ERC20 — no transfer restrictions.)
+///  2. User sends P33 shares to this vault and calls depositP33(amount).
+///     Principal is recorded as the xPHAR value of those shares at deposit time.
+///  3. Monthly (or on demand): harvestGains() → withdraws xPHAR appreciation
+///     above principal directly to yieldReceiver. Principal stays intact.
+///  4. Principal can be withdrawn via withdrawPrincipal() at any time (controller).
 ///
-/// ── Transfer restriction ──────────────────────────────────────────────────────
-///  xPHAR is non-transferable by default. Before sending xPHAR to this vault,
-///  the vault address must be added to Pharaoh's exemptTo whitelist by their
-///  AccessHub governance. Contact the Pharaoh team via Discord.
-///
-///  Alternative: deposit PHAR into the vault, then call convertPharToXPhar().
-///  Note the 50% PHAR burn penalty on that path.
-///
-/// ── Auto-claim ────────────────────────────────────────────────────────────────
-///  When enabled, anyone may call autoClaimYield() after claimInterval elapses.
-///  The caller earns a small AVAX bounty paid from the vault's native balance.
-///  The vault also implements checkUpkeep/performUpkeep for Chainlink Automation.
+/// ── Auto-harvest ──────────────────────────────────────────────────────────────
+///  When autoHarvestEnabled, anyone may call harvestGains() after harvestInterval.
+///  The caller earns a small AVAX bounty from the vault's native balance.
+///  The vault also implements Chainlink Automation checkUpkeep/performUpkeep.
 contract XPharVault is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // ── Immutable config ──────────────────────────────────────────────────────
-    IXPhar public immutable xphar;
-    IVoteModule public immutable voteModule;
-    IVoter public immutable voter;
-    IERC20 public immutable phar;      // underlying PHAR (for optional conversion path)
+    IP33 public immutable p33;
     address public immutable factory;
     address public immutable creator;
     uint256 public immutable createdAt;
@@ -45,29 +41,24 @@ contract XPharVault is ReentrancyGuard {
     address public controller;
     address public yieldReceiver;
 
-    // Stored FeeDistributors for auto-claim (controller manages this list)
-    address[] public feeDistributors;
-    // Per-distributor: which tokens to claim
-    mapping(address => address[]) public feeDistributorTokens;
+    /// @notice Cumulative xPHAR principal deposited (cost basis).
+    ///         Only decreases when withdrawPrincipal() is called.
+    uint256 public principal;
 
-    // ── Auto-claim state ──────────────────────────────────────────────────────
-    bool public autoClaimEnabled;
-    uint256 public claimInterval;   // seconds between permissionless claims
-    uint256 public lastClaimAt;     // timestamp of last auto/manual claim
-    uint256 public gasRefund;       // AVAX (wei) paid to auto-claim callers
+    // ── Auto-harvest state ────────────────────────────────────────────────────
+    bool public autoHarvestEnabled;
+    uint256 public harvestInterval;  // seconds between permissionless harvests
+    uint256 public lastHarvestAt;    // timestamp of last harvest
+    uint256 public gasRefund;        // AVAX (wei) paid to harvest callers
 
     // ── Events ────────────────────────────────────────────────────────────────
     event ControllerChanged(address indexed oldController, address indexed newController);
     event YieldReceiverChanged(address indexed oldReceiver, address indexed newReceiver);
-    event Staked(uint256 amount, uint256 totalStaked);
-    event Unstaked(uint256 amount);
-    event Voted(address[] pools, uint256[] weights);
-    event YieldClaimed(address indexed receiver);
-    event AutoClaimed(address indexed executor, uint256 refundPaid);
-    event AutoClaimConfigChanged(bool enabled, uint256 interval, uint256 refund);
-    event FeeDistributorAdded(address indexed fd);
-    event FeeDistributorRemoved(address indexed fd);
-    event PharConverted(uint256 pharIn, uint256 xpharReceived);
+    event Deposited(uint256 p33Shares, uint256 xpharPrincipal, uint256 totalPrincipal);
+    event GainsHarvested(uint256 xpharGain, address indexed receiver);
+    event PrincipalWithdrawn(uint256 xpharAmount, address indexed to);
+    event AutoHarvested(address indexed executor, uint256 refundPaid);
+    event AutoHarvestConfigChanged(bool enabled, uint256 interval, uint256 refund);
     event AvaxDeposited(address indexed from, uint256 amount);
     event AvaxWithdrawn(uint256 amount, address indexed to);
     event TokenRescued(address indexed token, uint256 amount, address indexed to);
@@ -76,11 +67,11 @@ contract XPharVault is ReentrancyGuard {
     error NotController();
     error ZeroAddress();
     error ZeroAmount();
-    error AutoClaimDisabled();
+    error AutoHarvestDisabled();
     error TooEarly(uint256 nextAllowedAt);
     error IntervalTooShort();
     error AvaxTransferFailed();
-    error FeeDistributorNotFound();
+    error NoGains();
 
     modifier onlyController() {
         if (msg.sender != controller) revert NotController();
@@ -88,127 +79,88 @@ contract XPharVault is ReentrancyGuard {
     }
 
     constructor(
-        address _xphar,
-        address _phar,
-        address _voteModule,
-        address _voter,
+        address _p33,
         address _controller,
         address _yieldReceiver,
         address _creator
     ) {
-        if (_xphar == address(0) || _phar == address(0)) revert ZeroAddress();
-        if (_voteModule == address(0) || _voter == address(0)) revert ZeroAddress();
+        if (_p33 == address(0)) revert ZeroAddress();
         if (_controller == address(0) || _yieldReceiver == address(0)) revert ZeroAddress();
 
-        xphar = IXPhar(_xphar);
-        phar = IERC20(_phar);
-        voteModule = IVoteModule(_voteModule);
-        voter = IVoter(_voter);
+        p33 = IP33(_p33);
         controller = _controller;
         yieldReceiver = _yieldReceiver;
         factory = msg.sender;
         creator = _creator;
         createdAt = block.timestamp;
 
-        // Auto-claim defaults (disabled until controller enables)
-        claimInterval = 7 days;
-        lastClaimAt = block.timestamp;
-        gasRefund = 0.05 ether;
-        autoClaimEnabled = false;
+        // Auto-harvest defaults (disabled until controller enables)
+        harvestInterval = 30 days;
+        lastHarvestAt = block.timestamp;
+        gasRefund = 0;
+        autoHarvestEnabled = false;
     }
 
-    // ── Receive AVAX for gas funding ──────────────────────────────────────────
+    // ── Receive AVAX for gas bounties ─────────────────────────────────────────
 
     receive() external payable {
         emit AvaxDeposited(msg.sender, msg.value);
     }
 
-    // ── Staking operations (controller only) ──────────────────────────────────
+    // ── Deposits ──────────────────────────────────────────────────────────────
 
-    /// @notice Stake a specific amount of xPHAR held by this vault into VoteModule
-    function stake(uint256 amount) external onlyController nonReentrant {
-        if (amount == 0) revert ZeroAmount();
-        IERC20(address(xphar)).forceApprove(address(voteModule), amount);
-        voteModule.deposit(amount);
-        emit Staked(amount, voteModule.balanceOf(address(this)));
+    /// @notice Deposit P33 shares into this vault and record their xPHAR value
+    ///         as principal. Call this after transferring P33 shares here.
+    ///         Anyone can call this — useful for the beneficiary to add to trust.
+    /// @param shares  Number of P33 shares to pull from msg.sender
+    function depositP33(uint256 shares) external nonReentrant {
+        if (shares == 0) revert ZeroAmount();
+
+        IERC20(address(p33)).safeTransferFrom(msg.sender, address(this), shares);
+
+        uint256 xpharValue = p33.convertToAssets(shares);
+        principal += xpharValue;
+
+        emit Deposited(shares, xpharValue, principal);
     }
 
-    /// @notice Stake the entire xPHAR balance held by this vault
-    function stakeAll() external onlyController nonReentrant {
-        uint256 balance = IERC20(address(xphar)).balanceOf(address(this));
-        if (balance == 0) revert ZeroAmount();
-        IERC20(address(xphar)).forceApprove(address(voteModule), balance);
-        voteModule.deposit(balance);
-        emit Staked(balance, voteModule.balanceOf(address(this)));
+    // ── Gain harvesting ───────────────────────────────────────────────────────
+
+    /// @notice Current xPHAR value of all P33 shares held by this vault.
+    function currentValue() public view returns (uint256) {
+        return p33.convertToAssets(IERC20(address(p33)).balanceOf(address(this)));
     }
 
-    /// @notice Unstake a specific amount of xPHAR from VoteModule
-    ///         Note: VoteModule enforces a cooldown after staking (default 12h)
-    function unstake(uint256 amount) external onlyController nonReentrant {
-        if (amount == 0) revert ZeroAmount();
-        voteModule.withdraw(amount);
-        emit Unstaked(amount);
+    /// @notice xPHAR gains above principal available to harvest right now.
+    function pendingGains() public view returns (uint256) {
+        uint256 value = currentValue();
+        return value > principal ? value - principal : 0;
     }
 
-    /// @notice Unstake the entire staked position
-    function unstakeAll() external onlyController nonReentrant {
-        uint256 staked = voteModule.balanceOf(address(this));
-        if (staked == 0) revert ZeroAmount();
-        voteModule.withdraw(staked);
-        emit Unstaked(staked);
+    /// @notice Withdraw appreciation above principal and send xPHAR to yieldReceiver.
+    ///         Controller-only, no time restriction.
+    function harvestGains() external onlyController nonReentrant {
+        _harvest();
     }
 
-    // ── Voting (controller only, each epoch ~weekly) ──────────────────────────
-
-    /// @notice Vote for pools to earn their trading fees this epoch.
-    ///         Must be called each week — votes do NOT carry over automatically.
-    /// @param _pools   Pool addresses to vote for
-    /// @param _weights Proportional weights (e.g. [50, 30, 20] = 50%/30%/20%)
-    function vote(
-        address[] calldata _pools,
-        uint256[] calldata _weights
-    ) external onlyController {
-        voter.vote(address(this), _pools, _weights);
-        emit Voted(_pools, _weights);
-    }
-
-    // ── Yield claiming ────────────────────────────────────────────────────────
-
-    /// @notice Claim trading fees from specific FeeDistributors and forward to yieldReceiver.
-    ///         Use this for one-off claims with custom distributor/token lists.
-    /// @param _feeDistributors FeeDistributor contract addresses to claim from
-    /// @param _tokens          Per-distributor token lists to claim
-    function claimYield(
-        address[] calldata _feeDistributors,
-        address[][] calldata _tokens
-    ) external onlyController nonReentrant {
-        _claimAndForward(_feeDistributors, _tokens);
-    }
-
-    /// @notice Claim from all stored FeeDistributors and forward yield to yieldReceiver.
-    ///         Controller-triggered alternative to the permissionless auto-claim.
-    function claimStoredYield() external onlyController nonReentrant {
-        lastClaimAt = block.timestamp;
-        _claimStoredAndForward();
-    }
-
-    /// @notice Permissionless weekly auto-claim. Caller earns a AVAX bounty.
-    ///         Also callable by Chainlink Automation or Gelato via performUpkeep.
-    function autoClaimYield() external nonReentrant {
-        if (!autoClaimEnabled) revert AutoClaimDisabled();
-        uint256 nextAllowed = lastClaimAt + claimInterval;
+    /// @notice Permissionless monthly harvest.
+    ///         Caller earns gasRefund AVAX from vault balance as a bounty.
+    ///         Callable by beneficiary wallet, keeper bots, or Chainlink Automation.
+    function autoHarvestGains() external nonReentrant {
+        if (!autoHarvestEnabled) revert AutoHarvestDisabled();
+        uint256 nextAllowed = lastHarvestAt + harvestInterval;
         if (block.timestamp < nextAllowed) revert TooEarly(nextAllowed);
 
-        lastClaimAt = block.timestamp;
-        _claimStoredAndForward();
+        lastHarvestAt = block.timestamp;
+        _harvest();
 
         uint256 refund = gasRefund;
         if (refund > 0 && address(this).balance >= refund) {
             (bool ok,) = payable(msg.sender).call{value: refund}("");
             if (!ok) revert AvaxTransferFailed();
-            emit AutoClaimed(msg.sender, refund);
+            emit AutoHarvested(msg.sender, refund);
         } else {
-            emit AutoClaimed(msg.sender, 0);
+            emit AutoHarvested(msg.sender, 0);
         }
     }
 
@@ -220,77 +172,69 @@ contract XPharVault is ReentrancyGuard {
         returns (bool upkeepNeeded, bytes memory)
     {
         upkeepNeeded =
-            autoClaimEnabled &&
-            feeDistributors.length > 0 &&
-            block.timestamp >= lastClaimAt + claimInterval &&
-            voteModule.balanceOf(address(this)) > 0;
+            autoHarvestEnabled &&
+            block.timestamp >= lastHarvestAt + harvestInterval &&
+            pendingGains() > 0;
     }
 
     function performUpkeep(bytes calldata) external nonReentrant {
-        if (!autoClaimEnabled) revert AutoClaimDisabled();
-        uint256 nextAllowed = lastClaimAt + claimInterval;
-        if (block.timestamp < nextAllowed) revert TooEarly(nextAllowed);
-        lastClaimAt = block.timestamp;
-        _claimStoredAndForward();
-        emit AutoClaimed(msg.sender, 0);
+        if (!autoHarvestEnabled) revert AutoHarvestDisabled();
+        if (block.timestamp < lastHarvestAt + harvestInterval)
+            revert TooEarly(lastHarvestAt + harvestInterval);
+        lastHarvestAt = block.timestamp;
+        _harvest();
+        emit AutoHarvested(msg.sender, 0);
     }
 
-    // ── FeeDistributor management (controller only) ───────────────────────────
+    // ── Principal management (controller only) ────────────────────────────────
 
-    /// @notice Add a FeeDistributor to the stored auto-claim list
-    /// @param fd     FeeDistributor contract address
-    /// @param tokens Reward tokens to claim from this distributor
-    function addFeeDistributor(address fd, address[] calldata tokens) external onlyController {
-        if (fd == address(0)) revert ZeroAddress();
-        feeDistributors.push(fd);
-        feeDistributorTokens[fd] = tokens;
-        emit FeeDistributorAdded(fd);
+    /// @notice Withdraw `xpharAmount` worth of xPHAR from the principal.
+    ///         Burns P33 shares and sends xPHAR to `to`. Reduces principal.
+    function withdrawPrincipal(uint256 xpharAmount, address to)
+        external
+        onlyController
+        nonReentrant
+    {
+        if (xpharAmount == 0) revert ZeroAmount();
+        if (to == address(0)) revert ZeroAddress();
+
+        // Clamp to available principal
+        uint256 withdrawable = xpharAmount <= principal ? xpharAmount : principal;
+        principal -= withdrawable;
+
+        p33.withdraw(withdrawable, to, address(this));
+        emit PrincipalWithdrawn(withdrawable, to);
     }
 
-    /// @notice Update the token list for an existing stored FeeDistributor
-    function updateFeeDistributorTokens(address fd, address[] calldata tokens) external onlyController {
-        feeDistributorTokens[fd] = tokens;
+    /// @notice Withdraw all P33 shares (principal + gains) and send xPHAR to `to`.
+    ///         Resets principal to zero.
+    function withdrawAll(address to) external onlyController nonReentrant {
+        if (to == address(0)) revert ZeroAddress();
+        uint256 shares = IERC20(address(p33)).balanceOf(address(this));
+        if (shares == 0) revert ZeroAmount();
+
+        principal = 0;
+        p33.redeem(shares, to, address(this));
+        emit PrincipalWithdrawn(0, to);
     }
 
-    /// @notice Remove a FeeDistributor from the stored list by index
-    function removeFeeDistributor(uint256 index) external onlyController {
-        address fd = feeDistributors[index];
-        feeDistributors[index] = feeDistributors[feeDistributors.length - 1];
-        feeDistributors.pop();
-        delete feeDistributorTokens[fd];
-        emit FeeDistributorRemoved(fd);
+    // ── Auto-harvest config (controller only) ─────────────────────────────────
+
+    function setAutoHarvestEnabled(bool enabled) external onlyController {
+        autoHarvestEnabled = enabled;
+        emit AutoHarvestConfigChanged(enabled, harvestInterval, gasRefund);
     }
 
-    // ── Optional PHAR→xPHAR conversion path ──────────────────────────────────
-
-    /// @notice Convert PHAR held by this vault into xPHAR via Pharaoh's native
-    ///         mechanism. WARNING: 50% of the PHAR input is burned. Only use
-    ///         this if the vault cannot receive xPHAR directly (whitelist issue).
-    function convertPharToXPhar(uint256 amount) external onlyController nonReentrant {
-        if (amount == 0) revert ZeroAmount();
-        uint256 xpharBefore = IERC20(address(xphar)).balanceOf(address(this));
-        phar.forceApprove(address(xphar), amount);
-        xphar.convertEmissionsToken(amount);
-        uint256 received = IERC20(address(xphar)).balanceOf(address(this)) - xpharBefore;
-        emit PharConverted(amount, received);
-    }
-
-    // ── Auto-claim config (controller only) ───────────────────────────────────
-
-    function setAutoClaimEnabled(bool enabled) external onlyController {
-        autoClaimEnabled = enabled;
-        emit AutoClaimConfigChanged(enabled, claimInterval, gasRefund);
-    }
-
-    function setClaimInterval(uint256 interval) external onlyController {
-        if (interval < 1 hours) revert IntervalTooShort();
-        claimInterval = interval;
-        emit AutoClaimConfigChanged(autoClaimEnabled, interval, gasRefund);
+    /// @param interval Minimum seconds between auto-harvests (min 1 day)
+    function setHarvestInterval(uint256 interval) external onlyController {
+        if (interval < 1 days) revert IntervalTooShort();
+        harvestInterval = interval;
+        emit AutoHarvestConfigChanged(autoHarvestEnabled, interval, gasRefund);
     }
 
     function setGasRefund(uint256 amount) external onlyController {
         gasRefund = amount;
-        emit AutoClaimConfigChanged(autoClaimEnabled, claimInterval, amount);
+        emit AutoHarvestConfigChanged(autoHarvestEnabled, harvestInterval, amount);
     }
 
     function withdrawAvax(uint256 amount, address payable to) external onlyController nonReentrant {
@@ -300,7 +244,7 @@ contract XPharVault is ReentrancyGuard {
         emit AvaxWithdrawn(amount, to);
     }
 
-    // ── Trustee config (controller only) ─────────────────────────────────────
+    // ── Config (controller only) ──────────────────────────────────────────────
 
     function setController(address newController) external onlyController {
         if (newController == address(0)) revert ZeroAddress();
@@ -314,7 +258,11 @@ contract XPharVault is ReentrancyGuard {
         yieldReceiver = newReceiver;
     }
 
-    function rescueToken(address token, uint256 amount, address to) external onlyController nonReentrant {
+    function rescueToken(address token, uint256 amount, address to)
+        external
+        onlyController
+        nonReentrant
+    {
         if (to == address(0)) revert ZeroAddress();
         IERC20(token).safeTransfer(to, amount);
         emit TokenRescued(token, amount, to);
@@ -322,95 +270,43 @@ contract XPharVault is ReentrancyGuard {
 
     // ── View helpers ──────────────────────────────────────────────────────────
 
-    function stakedBalance() external view returns (uint256) {
-        return voteModule.balanceOf(address(this));
-    }
-
-    function unstakedBalance() external view returns (uint256) {
-        return IERC20(address(xphar)).balanceOf(address(this));
+    function p33Balance() external view returns (uint256) {
+        return IERC20(address(p33)).balanceOf(address(this));
     }
 
     function avaxBalance() external view returns (uint256) {
         return address(this).balance;
     }
 
-    function nextClaimAt() external view returns (uint256) {
-        return lastClaimAt + claimInterval;
+    function nextHarvestAt() external view returns (uint256) {
+        return lastHarvestAt + harvestInterval;
     }
 
-    function getFeeDistributors() external view returns (address[] memory) {
-        return feeDistributors;
-    }
-
-    function getFeeDistributorTokens(address fd) external view returns (address[] memory) {
-        return feeDistributorTokens[fd];
+    /// @notice Full position summary in one call
+    function positionSummary() external view returns (
+        uint256 shares,
+        uint256 value,
+        uint256 cost,
+        uint256 gains,
+        uint256 ratio
+    ) {
+        shares = IERC20(address(p33)).balanceOf(address(this));
+        value  = p33.convertToAssets(shares);
+        cost   = principal;
+        gains  = value > cost ? value - cost : 0;
+        ratio  = p33.ratio();
     }
 
     // ── Internal ──────────────────────────────────────────────────────────────
 
-    function _claimStoredAndForward() internal {
-        if (feeDistributors.length == 0) return;
+    function _harvest() internal {
+        uint256 gain = pendingGains();
+        if (gain == 0) revert NoGains();
 
-        address[][] memory tokenLists = new address[][](feeDistributors.length);
-        for (uint256 i = 0; i < feeDistributors.length; i++) {
-            tokenLists[i] = feeDistributorTokens[feeDistributors[i]];
-        }
-
-        _claimAndForward(feeDistributors, tokenLists);
-    }
-
-    function _claimAndForward(
-        address[] memory _feeDistributors,
-        address[][] memory _tokens
-    ) internal {
-        // Collect unique reward tokens before claim to know what to sweep
-        // We snapshot balances before and sweep the difference to yieldReceiver
-        uint256 fdLen = _feeDistributors.length;
-
-        // Build flat unique token list for balance snapshot
-        address[] memory allTokens = _flatUniqueTokens(_tokens);
-        uint256[] memory balsBefore = new uint256[](allTokens.length);
-        for (uint256 i = 0; i < allTokens.length; i++) {
-            balsBefore[i] = IERC20(allTokens[i]).balanceOf(address(this));
-        }
-
-        // Batch claim via Voter
-        voter.claimIncentives(address(this), _feeDistributors, _tokens);
-
-        // Sweep all increases to yieldReceiver
         address receiver = yieldReceiver;
-        for (uint256 i = 0; i < allTokens.length; i++) {
-            uint256 received = IERC20(allTokens[i]).balanceOf(address(this)) - balsBefore[i];
-            if (received > 0) {
-                IERC20(allTokens[i]).safeTransfer(receiver, received);
-            }
-        }
+        // Withdraw exactly `gain` xPHAR from P33 and send directly to beneficiary
+        p33.withdraw(gain, receiver, address(this));
 
-        emit YieldClaimed(receiver);
-    }
-
-    /// @dev Deduplicate token addresses across multiple fee distributors
-    function _flatUniqueTokens(address[][] memory tokenLists) internal pure returns (address[] memory) {
-        uint256 total;
-        for (uint256 i = 0; i < tokenLists.length; i++) {
-            total += tokenLists[i].length;
-        }
-
-        address[] memory flat = new address[](total);
-        uint256 count;
-        for (uint256 i = 0; i < tokenLists.length; i++) {
-            for (uint256 j = 0; j < tokenLists[i].length; j++) {
-                address t = tokenLists[i][j];
-                bool found;
-                for (uint256 k = 0; k < count; k++) {
-                    if (flat[k] == t) { found = true; break; }
-                }
-                if (!found) flat[count++] = t;
-            }
-        }
-
-        address[] memory result = new address[](count);
-        for (uint256 i = 0; i < count; i++) result[i] = flat[i];
-        return result;
+        emit GainsHarvested(gain, receiver);
     }
 }

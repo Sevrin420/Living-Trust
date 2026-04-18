@@ -3,23 +3,18 @@ pragma solidity ^0.8.24;
 
 import {XPharVault} from "./XPharVault.sol";
 
-/// @notice Factory that deploys and tracks XPharVault instances for Pharaoh V3.
+/// @notice Factory that deploys and tracks XPharVault instances.
 ///
-/// ── xPHAR transfer restriction note ─────────────────────────────────────────
-/// xPHAR is non-transferable by default. Each vault address must be added to
-/// Pharaoh's exemptTo whitelist before users can send xPHAR to it.
-/// The factory owner should request batch whitelisting from the Pharaoh team:
-///   Discord: discord.gg/Pharaoh
-///   Docs:    docs.pharaoh.exchange
+/// Each vault holds P33 shares (Pharaoh's auto-compounding xPHAR ERC4626 vault),
+/// tracks the initial xPHAR principal, and sends monthly gains above that
+/// principal to a designated beneficiary wallet.
 ///
-/// Alternatively users can send PHAR to the vault and call convertPharToXPhar()
-/// (note: 50% of PHAR input is burned by the Pharaoh protocol on that path).
+/// P33 shares are standard ERC20 — no transfer restrictions.
+/// Users deposit xPHAR → P33 → send P33 shares to vault → vault tracks gains.
 contract XPharVaultFactory {
-    // ── Protocol addresses (Pharaoh V3 on Avalanche C-Chain) ─────────────────
-    address public immutable xphar;
-    address public immutable phar;
-    address public immutable voteModule;
-    address public immutable voter;
+    // ── Protocol address ──────────────────────────────────────────────────────
+    /// @notice Pharaoh V3 P33 contract (ERC4626 xPHAR auto-compounding vault)
+    address public immutable p33;
 
     // ── Registry ──────────────────────────────────────────────────────────────
     VaultInfo[] public vaults;
@@ -46,25 +41,14 @@ contract XPharVaultFactory {
     // ── Errors ────────────────────────────────────────────────────────────────
     error ZeroAddress();
 
-    constructor(
-        address _xphar,
-        address _phar,
-        address _voteModule,
-        address _voter
-    ) {
-        if (_xphar == address(0) || _phar == address(0)) revert ZeroAddress();
-        if (_voteModule == address(0) || _voter == address(0)) revert ZeroAddress();
-        xphar = _xphar;
-        phar = _phar;
-        voteModule = _voteModule;
-        voter = _voter;
+    constructor(address _p33) {
+        if (_p33 == address(0)) revert ZeroAddress();
+        p33 = _p33;
     }
 
     /// @notice Deploy a new XPharVault.
-    /// @param controller    The trustee wallet that manages vault operations
-    ///                      (stakes, votes, claims). Can be the same as creator.
-    /// @param yieldReceiver The beneficiary wallet that receives all claimed yield.
-    ///                      Can be any address — completely separate from controller.
+    /// @param controller    Trustee wallet — can deposit, harvest, and manage vault settings.
+    /// @param yieldReceiver Beneficiary wallet — receives all monthly xPHAR gains.
     function createVault(
         address controller,
         address yieldReceiver
@@ -72,10 +56,7 @@ contract XPharVaultFactory {
         if (controller == address(0) || yieldReceiver == address(0)) revert ZeroAddress();
 
         XPharVault newVault = new XPharVault(
-            xphar,
-            phar,
-            voteModule,
-            voter,
+            p33,
             controller,
             yieldReceiver,
             msg.sender
