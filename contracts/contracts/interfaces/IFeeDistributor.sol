@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.26;
 
 /// @notice Pharaoh V3 FeeDistributor — per-pool fee accounting for xPHAR voters
 interface IFeeDistributor {

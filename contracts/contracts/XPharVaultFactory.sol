@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.26;
 
 import {XPharVault} from "./XPharVault.sol";
 
@@ -12,9 +12,10 @@ import {XPharVault} from "./XPharVault.sol";
 /// P33 shares are standard ERC20 — no transfer restrictions.
 /// Users deposit xPHAR → P33 → send P33 shares to vault → vault tracks gains.
 contract XPharVaultFactory {
-    // ── Protocol address ──────────────────────────────────────────────────────
-    /// @notice Pharaoh V3 P33 contract (ERC4626 xPHAR auto-compounding vault)
+    // ── Protocol addresses ────────────────────────────────────────────────────
     address public immutable p33;
+    address public immutable phar;
+    address public immutable xphar;
 
     // ── Registry ──────────────────────────────────────────────────────────────
     VaultInfo[] public vaults;
@@ -41,9 +42,11 @@ contract XPharVaultFactory {
     // ── Errors ────────────────────────────────────────────────────────────────
     error ZeroAddress();
 
-    constructor(address _p33) {
-        if (_p33 == address(0)) revert ZeroAddress();
+    constructor(address _p33, address _phar, address _xphar) {
+        if (_p33 == address(0) || _phar == address(0) || _xphar == address(0)) revert ZeroAddress();
         p33 = _p33;
+        phar = _phar;
+        xphar = _xphar;
     }
 
     /// @notice Deploy a new XPharVault.
@@ -57,6 +60,8 @@ contract XPharVaultFactory {
 
         XPharVault newVault = new XPharVault(
             p33,
+            phar,
+            xphar,
             controller,
             yieldReceiver,
             msg.sender

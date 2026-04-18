@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.26;
 
 /// @notice Pharaoh V3 P33 — canonical ERC4626 xPHAR auto-compounding vault.
 ///         Deposits xPHAR, receives P33 shares. P33 auto-votes each epoch

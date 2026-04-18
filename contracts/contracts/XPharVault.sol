@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IP33} from "./interfaces/IP33.sol";
+import {IXPhar} from "./interfaces/IXPhar.sol";
 
 /// @notice A living trust vault that holds P33 shares (Pharaoh's auto-compounding
 ///         xPHAR vault), tracks the initial xPHAR principal, and each month
@@ -33,6 +34,8 @@ contract XPharVault is ReentrancyGuard {
 
     // ── Immutable config ──────────────────────────────────────────────────────
     IP33 public immutable p33;
+    IXPhar public immutable xphar;
+    IERC20 public immutable phar;
     address public immutable factory;
     address public immutable creator;
     uint256 public immutable createdAt;
@@ -80,14 +83,18 @@ contract XPharVault is ReentrancyGuard {
 
     constructor(
         address _p33,
+        address _phar,
+        address _xphar,
         address _controller,
         address _yieldReceiver,
         address _creator
     ) {
-        if (_p33 == address(0)) revert ZeroAddress();
+        if (_p33 == address(0) || _phar == address(0) || _xphar == address(0)) revert ZeroAddress();
         if (_controller == address(0) || _yieldReceiver == address(0)) revert ZeroAddress();
 
         p33 = IP33(_p33);
+        phar = IERC20(_phar);
+        xphar = IXPhar(_xphar);
         controller = _controller;
         yieldReceiver = _yieldReceiver;
         factory = msg.sender;
@@ -122,6 +129,33 @@ contract XPharVault is ReentrancyGuard {
         principal += xpharValue;
 
         emit Deposited(shares, xpharValue, principal);
+    }
+
+    /// @notice Deposit PHAR: pulls PHAR from caller, converts to xPHAR via
+    ///         convertEmissionsToken (50% slashing penalty), then deposits the
+    ///         resulting xPHAR into P33. Principal is recorded as xPHAR received.
+    ///         Caller must approve this vault to spend their PHAR first.
+    /// @param pharAmount  Amount of PHAR to deposit
+    function depositPhar(uint256 pharAmount) external nonReentrant {
+        if (pharAmount == 0) revert ZeroAmount();
+
+        phar.safeTransferFrom(msg.sender, address(this), pharAmount);
+
+        // Allow xPHAR contract to pull our PHAR during conversion
+        phar.approve(address(xphar), pharAmount);
+
+        uint256 xpharBefore = IERC20(address(xphar)).balanceOf(address(this));
+        xphar.convertEmissionsToken(pharAmount);
+        uint256 xpharReceived = IERC20(address(xphar)).balanceOf(address(this)) - xpharBefore;
+
+        if (xpharReceived == 0) revert ZeroAmount();
+
+        // Deposit xPHAR into P33, vault receives the shares
+        IERC20(address(xphar)).approve(address(p33), xpharReceived);
+        uint256 shares = p33.deposit(xpharReceived, address(this));
+
+        principal += xpharReceived;
+        emit Deposited(shares, xpharReceived, principal);
     }
 
     // ── Gain harvesting ───────────────────────────────────────────────────────

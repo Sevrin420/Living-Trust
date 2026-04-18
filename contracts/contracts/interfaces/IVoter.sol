@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.26;
 
 /// @notice Pharaoh V3 Voter — voting and batch fee claiming
 interface IVoter {

@@ -1,72 +1,112 @@
 "use client";
 
-import { Header } from "@/components/Header";
+import { Header }      from "@/components/Header";
 import { CreateVault } from "@/components/CreateVault";
-import { VaultList } from "@/components/VaultList";
-import { useAccount } from "wagmi";
+import { VaultList }   from "@/components/VaultList";
+import { useAccount }  from "wagmi";
+import { ConnectButton } from "@rainbow-me/rainbowkit";
+
+const HOW_IT_WORKS = [
+  {
+    step: "01",
+    title: "Create a Trust Vault",
+    desc:  "Set a controller (trustee) who manages the vault and a yield receiver (beneficiary) who receives monthly gains. The creator doesn't need to be either.",
+  },
+  {
+    step: "02",
+    title: "Deposit PHAR",
+    desc:  "Send PHAR to the vault. It is automatically converted to xPHAR (50% lock-in) and deposited into Pharaoh's P33 auto-compounding vault.",
+  },
+  {
+    step: "03",
+    title: "Harvest Gains Monthly",
+    desc:  "As the xPHAR-per-share ratio grows, the vault skims only the appreciation above your original principal and forwards it to the beneficiary wallet.",
+  },
+];
 
 export default function Home() {
-  const { isConnected } = useAccount();
+  const { isConnected, address } = useAccount();
 
   return (
     <div className="min-h-screen flex flex-col">
       <Header />
 
-      <main className="flex-1 max-w-5xl mx-auto w-full px-4 py-10 space-y-12">
-        {/* Hero */}
-        <section className="text-center space-y-4 pt-4">
-          <h1 className="text-4xl font-bold tracking-tight">
-            <span className="text-gold-500">xPHAR</span> Living Trusts
-          </h1>
-          <p className="text-white/60 max-w-xl mx-auto text-base leading-relaxed">
-            Deploy non-custodial vaults that stake your xPHAR on{" "}
-            <span className="text-gold-400">Pharaoh Exchange</span>, claim yield automatically,
-            and forward it to any designated wallet — controlled by a trustee of your choice.
-          </p>
-        </section>
-
-        {/* How it works */}
-        <section className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          {[
-            {
-              step: "01",
-              title: "Create a Vault",
-              desc: "Set a controller (trustee) and a yield receiver (beneficiary). The creator wallet doesn't need to be either.",
-            },
-            {
-              step: "02",
-              title: "Deposit xPHAR",
-              desc: "Send xPHAR directly to the vault address. The controller then stakes it in Pharaoh's gauge to start earning.",
-            },
-            {
-              step: "03",
-              title: "Claim & Forward",
-              desc: "The controller calls Claim Yield at any time. All accumulated rewards are sent straight to the beneficiary wallet.",
-            },
-          ].map((item) => (
-            <div key={item.step} className="card-gold-border rounded-xl p-5 space-y-2">
-              <span className="text-gold-500 font-mono text-sm">{item.step}</span>
-              <h3 className="font-semibold text-white">{item.title}</h3>
-              <p className="text-white/55 text-sm leading-relaxed">{item.desc}</p>
+      {!isConnected ? (
+        /* ── Landing page ─────────────────────────────────────────────────── */
+        <main className="flex-1 flex flex-col items-center px-4">
+          {/* Hero */}
+          <section className="flex flex-col items-center text-center gap-6 pt-24 pb-16 max-w-2xl">
+            {/* Ankh mark */}
+            <div className="w-16 h-16 flex items-center justify-center rounded-full bg-gold-500/10 border border-gold-500/20">
+              <svg width="36" height="36" viewBox="0 0 28 28" fill="none" className="text-gold-500">
+                <circle cx="14" cy="8" r="4.5" stroke="currentColor" strokeWidth="2" />
+                <line x1="14" y1="12.5" x2="14" y2="26" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                <line x1="8"  y1="17"  x2="20" y2="17"  stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </svg>
             </div>
-          ))}
-        </section>
 
-        {/* Create vault form */}
-        {isConnected ? (
+            <div className="space-y-3">
+              <h1 className="text-5xl font-bold tracking-tight leading-tight">
+                <span className="text-gold-500">xPHAR</span> Living Trusts
+              </h1>
+              <p className="text-white/60 text-lg leading-relaxed">
+                Non-custodial yield vaults on{" "}
+                <span className="text-gold-400">Pharaoh Exchange</span>. Deposit PHAR,
+                auto-compound inside P33, and stream gains to any beneficiary wallet — forever.
+              </p>
+            </div>
+
+            <div className="pt-2">
+              <ConnectButton label="Connect Wallet to Get Started" />
+            </div>
+
+            <p className="text-xs text-white/25">Avalanche C-Chain · Non-custodial · Powered by Pharaoh V3</p>
+          </section>
+
+          {/* How it works */}
+          <section className="w-full max-w-4xl pb-20">
+            <h2 className="text-center text-sm font-semibold text-white/40 uppercase tracking-widest mb-6">
+              How it works
+            </h2>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              {HOW_IT_WORKS.map((item) => (
+                <div key={item.step} className="card-gold-border rounded-xl p-5 space-y-2">
+                  <span className="text-gold-500 font-mono text-sm">{item.step}</span>
+                  <h3 className="font-semibold text-white">{item.title}</h3>
+                  <p className="text-white/55 text-sm leading-relaxed">{item.desc}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+        </main>
+      ) : (
+        /* ── Dashboard ────────────────────────────────────────────────────── */
+        <main className="flex-1 max-w-5xl mx-auto w-full px-4 py-8 space-y-8">
+
+          {/* Welcome bar */}
+          <section className="flex items-center justify-between">
+            <div>
+              <h1 className="text-2xl font-bold text-white">Dashboard</h1>
+              <p className="text-xs text-white/40 mt-0.5">
+                Connected as{" "}
+                <span className="font-mono text-gold-400/80">
+                  {address?.slice(0, 6)}…{address?.slice(-4)}
+                </span>
+              </p>
+            </div>
+            <ConnectButton chainStatus="icon" showBalance={false} accountStatus="avatar" />
+          </section>
+
+          {/* Create vault */}
           <CreateVault />
-        ) : (
-          <div className="card-gold-border rounded-xl p-8 text-center">
-            <p className="text-white/50">Connect your wallet to create or manage vaults.</p>
-          </div>
-        )}
 
-        {/* Vault list */}
-        <VaultList />
-      </main>
+          {/* Vault list */}
+          <VaultList />
+        </main>
+      )}
 
-      <footer className="text-center text-white/25 text-xs py-6">
-        Living Trust · Powered by Pharaoh Exchange on Avalanche
+      <footer className="text-center text-white/20 text-xs py-6">
+        Living Trust · Pharaoh Exchange · Avalanche
       </footer>
     </div>
   );
