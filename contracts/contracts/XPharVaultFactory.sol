@@ -5,15 +5,11 @@ import {XPharVault} from "./XPharVault.sol";
 
 /// @notice Factory that deploys and tracks XPharVault instances.
 ///
-/// Each vault holds P33 shares (Pharaoh's auto-compounding xPHAR ERC4626 vault),
-/// tracks the initial xPHAR principal, and sends monthly gains above that
-/// principal to a designated beneficiary wallet.
-///
-/// P33 shares are standard ERC20 — no transfer restrictions.
-/// Users deposit xPHAR → P33 → send P33 shares to vault → vault tracks gains.
+/// Each vault stakes xPHAR in Pharaoh's auto-voting gauge, accumulates reward
+/// tokens each epoch, and forwards them to a designated beneficiary wallet.
 contract XPharVaultFactory {
     // ── Protocol addresses ────────────────────────────────────────────────────
-    address public immutable p33;
+    address public immutable staking;  // auto-voting xPHAR gauge
     address public immutable phar;
     address public immutable xphar;
 
@@ -42,16 +38,16 @@ contract XPharVaultFactory {
     // ── Errors ────────────────────────────────────────────────────────────────
     error ZeroAddress();
 
-    constructor(address _p33, address _phar, address _xphar) {
-        if (_p33 == address(0) || _phar == address(0) || _xphar == address(0)) revert ZeroAddress();
-        p33 = _p33;
+    constructor(address _staking, address _phar, address _xphar) {
+        if (_staking == address(0) || _phar == address(0) || _xphar == address(0)) revert ZeroAddress();
+        staking = _staking;
         phar = _phar;
         xphar = _xphar;
     }
 
     /// @notice Deploy a new XPharVault.
     /// @param controller    Trustee wallet — can deposit, harvest, and manage vault settings.
-    /// @param yieldReceiver Beneficiary wallet — receives all monthly xPHAR gains.
+    /// @param yieldReceiver Beneficiary wallet — receives all harvested reward tokens.
     function createVault(
         address controller,
         address yieldReceiver
@@ -59,7 +55,7 @@ contract XPharVaultFactory {
         if (controller == address(0) || yieldReceiver == address(0)) revert ZeroAddress();
 
         XPharVault newVault = new XPharVault(
-            p33,
+            staking,
             phar,
             xphar,
             controller,

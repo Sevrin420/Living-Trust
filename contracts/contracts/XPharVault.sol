@@ -4,36 +4,25 @@ pragma solidity ^0.8.26;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {IP33} from "./interfaces/IP33.sol";
+import {IXPharStaking} from "./interfaces/IXPharStaking.sol";
 import {IXPhar} from "./interfaces/IXPhar.sol";
 
-/// @notice A living trust vault that holds P33 shares (Pharaoh's auto-compounding
-///         xPHAR vault), tracks the initial xPHAR principal, and each month
-///         withdraws only the appreciation above that principal to a designated
-///         beneficiary wallet.
-///
-/// ── Why P33? ──────────────────────────────────────────────────────────────────
-///  P33 auto-votes each epoch and compounds all voting rewards back into xPHAR.
-///  The xPHAR-per-share ratio increases over time. The vault skims the gain.
+/// @notice A living trust vault that stakes xPHAR in Pharaoh's auto-voting gauge,
+///         tracks the original xPHAR principal, and each harvest cycle forwards
+///         all accumulated reward tokens to a designated beneficiary wallet.
 ///
 /// ── Flow ──────────────────────────────────────────────────────────────────────
-///  1. User deposits xPHAR → P33 (standard ERC4626) → receives P33 shares.
-///     (P33 shares are a normal ERC20 — no transfer restrictions.)
-///  2. User sends P33 shares to this vault and calls depositP33(amount).
-///     Principal is recorded as the xPHAR value of those shares at deposit time.
-///  3. Monthly (or on demand): harvestGains() → withdraws xPHAR appreciation
-///     above principal directly to yieldReceiver. Principal stays intact.
-///  4. Principal can be withdrawn via withdrawPrincipal() at any time (controller).
-///
-/// ── Auto-harvest ──────────────────────────────────────────────────────────────
-///  When autoHarvestEnabled, anyone may call harvestGains() after harvestInterval.
-///  The caller earns a small AVAX bounty from the vault's native balance.
-///  The vault also implements Chainlink Automation checkUpkeep/performUpkeep.
+///  1. Deposit PHAR → vault converts to xPHAR (50% slashing via convertEmissionsToken)
+///     and stakes in the auto-voting gauge.
+///     OR: deposit xPHAR directly (no penalty).
+///  2. The gauge votes each epoch and accumulates reward tokens.
+///  3. Monthly (or on demand): harvestGains() claims rewards and sends them to yieldReceiver.
+///  4. Principal (staked xPHAR) can be withdrawn at any time by the controller.
 contract XPharVault is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // ── Immutable config ──────────────────────────────────────────────────────
-    IP33 public immutable p33;
+    IXPharStaking public immutable staking;  // auto-voting xPHAR gauge
     IXPhar public immutable xphar;
     IERC20 public immutable phar;
     address public immutable factory;
@@ -44,21 +33,20 @@ contract XPharVault is ReentrancyGuard {
     address public controller;
     address public yieldReceiver;
 
-    /// @notice Cumulative xPHAR principal deposited (cost basis).
-    ///         Only decreases when withdrawPrincipal() is called.
+    /// @notice Cumulative xPHAR staked (cost basis). Only decreases on withdrawal.
     uint256 public principal;
 
     // ── Auto-harvest state ────────────────────────────────────────────────────
     bool public autoHarvestEnabled;
     uint256 public harvestInterval;  // seconds between permissionless harvests
-    uint256 public lastHarvestAt;    // timestamp of last harvest
+    uint256 public lastHarvestAt;
     uint256 public gasRefund;        // AVAX (wei) paid to harvest callers
 
     // ── Events ────────────────────────────────────────────────────────────────
     event ControllerChanged(address indexed oldController, address indexed newController);
     event YieldReceiverChanged(address indexed oldReceiver, address indexed newReceiver);
-    event Deposited(uint256 p33Shares, uint256 xpharPrincipal, uint256 totalPrincipal);
-    event GainsHarvested(uint256 xpharGain, address indexed receiver);
+    event Deposited(uint256 xpharStaked, uint256 xpharPrincipal, uint256 totalPrincipal);
+    event GainsHarvested(uint256 rewardAmount, address indexed rewardToken, address indexed receiver);
     event PrincipalWithdrawn(uint256 xpharAmount, address indexed to);
     event AutoHarvested(address indexed executor, uint256 refundPaid);
     event AutoHarvestConfigChanged(bool enabled, uint256 interval, uint256 refund);
@@ -82,17 +70,17 @@ contract XPharVault is ReentrancyGuard {
     }
 
     constructor(
-        address _p33,
+        address _staking,
         address _phar,
         address _xphar,
         address _controller,
         address _yieldReceiver,
         address _creator
     ) {
-        if (_p33 == address(0) || _phar == address(0) || _xphar == address(0)) revert ZeroAddress();
+        if (_staking == address(0) || _phar == address(0) || _xphar == address(0)) revert ZeroAddress();
         if (_controller == address(0) || _yieldReceiver == address(0)) revert ZeroAddress();
 
-        p33 = IP33(_p33);
+        staking = IXPharStaking(_staking);
         phar = IERC20(_phar);
         xphar = IXPhar(_xphar);
         controller = _controller;
@@ -101,14 +89,11 @@ contract XPharVault is ReentrancyGuard {
         creator = _creator;
         createdAt = block.timestamp;
 
-        // Auto-harvest defaults (disabled until controller enables)
         harvestInterval = 30 days;
         lastHarvestAt = block.timestamp;
         gasRefund = 0;
         autoHarvestEnabled = false;
     }
-
-    // ── Receive AVAX for gas bounties ─────────────────────────────────────────
 
     receive() external payable {
         emit AvaxDeposited(msg.sender, msg.value);
@@ -116,32 +101,22 @@ contract XPharVault is ReentrancyGuard {
 
     // ── Deposits ──────────────────────────────────────────────────────────────
 
-    /// @notice Deposit P33 shares into this vault and record their xPHAR value
-    ///         as principal. Call this after transferring P33 shares here.
-    ///         Anyone can call this — useful for the beneficiary to add to trust.
-    /// @param shares  Number of P33 shares to pull from msg.sender
-    function depositP33(uint256 shares) external nonReentrant {
-        if (shares == 0) revert ZeroAmount();
-
-        IERC20(address(p33)).safeTransferFrom(msg.sender, address(this), shares);
-
-        uint256 xpharValue = p33.convertToAssets(shares);
-        principal += xpharValue;
-
-        emit Deposited(shares, xpharValue, principal);
+    /// @notice Deposit xPHAR directly: pulls from caller and stakes in the gauge.
+    function depositXPhar(uint256 amount) external nonReentrant {
+        if (amount == 0) revert ZeroAmount();
+        IERC20(address(xphar)).safeTransferFrom(msg.sender, address(this), amount);
+        IERC20(address(xphar)).approve(address(staking), amount);
+        staking.deposit(amount);
+        principal += amount;
+        emit Deposited(amount, amount, principal);
     }
 
-    /// @notice Deposit PHAR: pulls PHAR from caller, converts to xPHAR via
-    ///         convertEmissionsToken (50% slashing penalty), then deposits the
-    ///         resulting xPHAR into P33. Principal is recorded as xPHAR received.
-    ///         Caller must approve this vault to spend their PHAR first.
-    /// @param pharAmount  Amount of PHAR to deposit
+    /// @notice Deposit PHAR: convert to xPHAR (50% slashing penalty), then stake.
+    ///         Caller must approve this vault for PHAR first.
     function depositPhar(uint256 pharAmount) external nonReentrant {
         if (pharAmount == 0) revert ZeroAmount();
 
         phar.safeTransferFrom(msg.sender, address(this), pharAmount);
-
-        // Allow xPHAR contract to pull our PHAR during conversion
         phar.approve(address(xphar), pharAmount);
 
         uint256 xpharBefore = IERC20(address(xphar)).balanceOf(address(this));
@@ -150,36 +125,32 @@ contract XPharVault is ReentrancyGuard {
 
         if (xpharReceived == 0) revert ZeroAmount();
 
-        // Deposit xPHAR into P33, vault receives the shares
-        IERC20(address(xphar)).approve(address(p33), xpharReceived);
-        uint256 shares = p33.deposit(xpharReceived, address(this));
+        IERC20(address(xphar)).approve(address(staking), xpharReceived);
+        staking.deposit(xpharReceived);
 
         principal += xpharReceived;
-        emit Deposited(shares, xpharReceived, principal);
+        emit Deposited(xpharReceived, xpharReceived, principal);
     }
 
     // ── Gain harvesting ───────────────────────────────────────────────────────
 
-    /// @notice Current xPHAR value of all P33 shares held by this vault.
-    function currentValue() public view returns (uint256) {
-        return p33.convertToAssets(IERC20(address(p33)).balanceOf(address(this)));
+    /// @notice xPHAR currently staked in the gauge by this vault.
+    function stakedBalance() public view returns (uint256) {
+        return staking.balanceOf(address(this));
     }
 
-    /// @notice xPHAR gains above principal available to harvest right now.
+    /// @notice Reward tokens pending harvest (in the gauge's reward token).
     function pendingGains() public view returns (uint256) {
-        uint256 value = currentValue();
-        return value > principal ? value - principal : 0;
+        return staking.earned(address(this), staking.rewardToken());
     }
 
-    /// @notice Withdraw appreciation above principal and send xPHAR to yieldReceiver.
-    ///         Controller-only, no time restriction.
+    /// @notice Claim rewards and send to yieldReceiver. Controller-only, no time restriction.
     function harvestGains() external onlyController nonReentrant {
         _harvest();
     }
 
-    /// @notice Permissionless monthly harvest.
+    /// @notice Permissionless harvest after harvestInterval elapses.
     ///         Caller earns gasRefund AVAX from vault balance as a bounty.
-    ///         Callable by beneficiary wallet, keeper bots, or Chainlink Automation.
     function autoHarvestGains() external nonReentrant {
         if (!autoHarvestEnabled) revert AutoHarvestDisabled();
         uint256 nextAllowed = lastHarvestAt + harvestInterval;
@@ -222,8 +193,7 @@ contract XPharVault is ReentrancyGuard {
 
     // ── Principal management (controller only) ────────────────────────────────
 
-    /// @notice Withdraw `xpharAmount` worth of xPHAR from the principal.
-    ///         Burns P33 shares and sends xPHAR to `to`. Reduces principal.
+    /// @notice Unstake `xpharAmount` from the gauge and send xPHAR to `to`.
     function withdrawPrincipal(uint256 xpharAmount, address to)
         external
         onlyController
@@ -232,24 +202,24 @@ contract XPharVault is ReentrancyGuard {
         if (xpharAmount == 0) revert ZeroAmount();
         if (to == address(0)) revert ZeroAddress();
 
-        // Clamp to available principal
         uint256 withdrawable = xpharAmount <= principal ? xpharAmount : principal;
         principal -= withdrawable;
 
-        p33.withdraw(withdrawable, to, address(this));
+        staking.withdraw(withdrawable);
+        IERC20(address(xphar)).safeTransfer(to, withdrawable);
         emit PrincipalWithdrawn(withdrawable, to);
     }
 
-    /// @notice Withdraw all P33 shares (principal + gains) and send xPHAR to `to`.
-    ///         Resets principal to zero.
+    /// @notice Unstake all xPHAR and send to `to`. Resets principal to zero.
     function withdrawAll(address to) external onlyController nonReentrant {
         if (to == address(0)) revert ZeroAddress();
-        uint256 shares = IERC20(address(p33)).balanceOf(address(this));
-        if (shares == 0) revert ZeroAmount();
+        uint256 staked = staking.balanceOf(address(this));
+        if (staked == 0) revert ZeroAmount();
 
         principal = 0;
-        p33.redeem(shares, to, address(this));
-        emit PrincipalWithdrawn(0, to);
+        staking.withdraw(staked);
+        IERC20(address(xphar)).safeTransfer(to, staked);
+        emit PrincipalWithdrawn(staked, to);
     }
 
     // ── Auto-harvest config (controller only) ─────────────────────────────────
@@ -304,10 +274,6 @@ contract XPharVault is ReentrancyGuard {
 
     // ── View helpers ──────────────────────────────────────────────────────────
 
-    function p33Balance() external view returns (uint256) {
-        return IERC20(address(p33)).balanceOf(address(this));
-    }
-
     function avaxBalance() external view returns (uint256) {
         return address(this).balance;
     }
@@ -318,29 +284,32 @@ contract XPharVault is ReentrancyGuard {
 
     /// @notice Full position summary in one call
     function positionSummary() external view returns (
-        uint256 shares,
-        uint256 value,
+        uint256 staked,
+        uint256 pending,
         uint256 cost,
-        uint256 gains,
-        uint256 ratio
+        address rewardTok
     ) {
-        shares = IERC20(address(p33)).balanceOf(address(this));
-        value  = p33.convertToAssets(shares);
-        cost   = principal;
-        gains  = value > cost ? value - cost : 0;
-        ratio  = p33.ratio();
+        staked    = staking.balanceOf(address(this));
+        cost      = principal;
+        rewardTok = staking.rewardToken();
+        pending   = staking.earned(address(this), rewardTok);
     }
 
     // ── Internal ──────────────────────────────────────────────────────────────
 
     function _harvest() internal {
-        uint256 gain = pendingGains();
-        if (gain == 0) revert NoGains();
+        address rewardTok = staking.rewardToken();
+        uint256 before = IERC20(rewardTok).balanceOf(address(this));
+
+        address[] memory tokens = new address[](1);
+        tokens[0] = rewardTok;
+        staking.getReward(address(this), tokens);
+
+        uint256 gained = IERC20(rewardTok).balanceOf(address(this)) - before;
+        if (gained == 0) revert NoGains();
 
         address receiver = yieldReceiver;
-        // Withdraw exactly `gain` xPHAR from P33 and send directly to beneficiary
-        p33.withdraw(gain, receiver, address(this));
-
-        emit GainsHarvested(gain, receiver);
+        IERC20(rewardTok).safeTransfer(receiver, gained);
+        emit GainsHarvested(gained, rewardTok, receiver);
     }
 }

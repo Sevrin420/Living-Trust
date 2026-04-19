@@ -26,14 +26,14 @@ export function VaultCard({ info }: { info: VaultInfo }) {
   const { address } = useAccount();
   const isController = address?.toLowerCase() === info.controller.toLowerCase();
 
-  const [expanded,      setExpanded]      = useState(false);
-  const [panel,         setPanel]         = useState<Panel>("position");
-  const [pharInput,     setPharInput]     = useState("");
-  const [intervalDays,  setIntervalDays]  = useState("30");
-  const [refundAvax,    setRefundAvax]    = useState("0");
-  const [depositAvax,   setDepositAvax]   = useState("");
-  const [withdrawAmt,   setWithdrawAmt]   = useState("");
-  const [withdrawTo,    setWithdrawTo]    = useState("");
+  const [expanded,     setExpanded]     = useState(false);
+  const [panel,        setPanel]        = useState<Panel>("position");
+  const [pharInput,    setPharInput]    = useState("");
+  const [intervalDays, setIntervalDays] = useState("30");
+  const [refundAvax,   setRefundAvax]   = useState("0");
+  const [depositAvax,  setDepositAvax]  = useState("");
+  const [withdrawAmt,  setWithdrawAmt]  = useState("");
+  const [withdrawTo,   setWithdrawTo]   = useState("");
 
   const contract = { address: info.vault, abi: VAULT_ABI } as const;
 
@@ -61,7 +61,7 @@ export function VaultCard({ info }: { info: VaultInfo }) {
     ],
   });
 
-  type PositionTuple = { shares: bigint; value: bigint; cost: bigint; gains: bigint; ratio: bigint };
+  type PositionTuple = { staked: bigint; pending: bigint; cost: bigint; rewardTok: string };
   const position      = reads?.[0]?.result as PositionTuple | undefined;
   const autoEnabled   = reads?.[1]?.result as boolean   | undefined;
   const harvestIntSec = reads?.[2]?.result as bigint    | undefined;
@@ -71,9 +71,9 @@ export function VaultCard({ info }: { info: VaultInfo }) {
   const pharBalance   = reads?.[6]?.result as bigint    | undefined;
   const pharAllowance = reads?.[7]?.result as bigint    | undefined;
 
-  const now      = BigInt(Math.floor(Date.now() / 1000));
+  const now        = BigInt(Math.floor(Date.now() / 1000));
   const harvestDue = nextHarvest !== undefined && now >= nextHarvest;
-  const hasGains   = position !== undefined && position.gains > BigInt(0);
+  const hasPending = position !== undefined && position.pending > BigInt(0);
 
   let pharInputWei = BigInt(0);
   try { pharInputWei = parseEther(pharInput || "0"); } catch { /* invalid input */ }
@@ -176,9 +176,9 @@ export function VaultCard({ info }: { info: VaultInfo }) {
                 {harvestDue ? "Harvest due" : "Auto ✓"}
               </span>
             )}
-            {hasGains && !autoEnabled && (
+            {hasPending && !autoEnabled && (
               <span className="text-xs bg-gold-500/15 text-gold-400 border border-gold-500/25 rounded px-1.5 py-0.5">
-                Gains ready
+                Rewards ready
               </span>
             )}
           </div>
@@ -187,15 +187,15 @@ export function VaultCard({ info }: { info: VaultInfo }) {
 
         <div className="flex items-center gap-5 text-right">
           <div>
-            <p className="text-xs text-white/40">Gains</p>
-            <p className={`text-sm font-semibold ${hasGains ? "text-green-400" : "text-white/50"}`}>
-              {position ? `${fmt(position.gains)} xPHAR` : "—"}
+            <p className="text-xs text-white/40">Pending</p>
+            <p className={`text-sm font-semibold ${hasPending ? "text-green-400" : "text-white/50"}`}>
+              {position ? fmt(position.pending) : "—"}
             </p>
           </div>
           <div>
-            <p className="text-xs text-white/40">Value</p>
+            <p className="text-xs text-white/40">Staked xPHAR</p>
             <p className="text-sm font-semibold text-white">
-              {position ? `${fmt(position.value)} xPHAR` : "—"}
+              {position ? fmt(position.staked) : "—"}
             </p>
           </div>
           <div>
@@ -241,15 +241,12 @@ export function VaultCard({ info }: { info: VaultInfo }) {
           {/* ── Position panel ── */}
           {(!isController || panel === "position") && (
             <div className="space-y-4">
-              {/* Position summary grid */}
               {position && (
-                <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                   {([
-                    ["P33 Shares",   fmt(position.shares)],
-                    ["xPHAR Value",  fmt(position.value)],
-                    ["Principal",    fmt(position.cost)],
-                    ["Gains",        fmt(position.gains), hasGains ? "text-green-400" : ""],
-                    ["P33 Ratio",    `${parseFloat(formatEther(position.ratio)).toFixed(4)}x`],
+                    ["Staked xPHAR",     fmt(position.staked)],
+                    ["Principal",        fmt(position.cost)],
+                    ["Pending Rewards",  fmt(position.pending), hasPending ? "text-green-400" : ""],
                   ] as [string, string, string?][]).map(([label, val, cls]) => (
                     <div key={label} className="bg-white/3 rounded-lg px-3 py-2.5">
                       <p className="text-xs text-white/40 mb-0.5">{label}</p>
@@ -265,14 +262,14 @@ export function VaultCard({ info }: { info: VaultInfo }) {
                   <div className="flex flex-wrap gap-2">
                     <button
                       className="btn-gold px-4 py-2 text-xs"
-                      disabled={busy || !hasGains}
+                      disabled={busy || !hasPending}
                       onClick={() => write("harvestGains")}
                     >
-                      Harvest Gains
+                      Harvest Rewards
                     </button>
                     <button
                       className="btn-outline px-4 py-2 text-xs"
-                      disabled={busy || !position || position.shares === BigInt(0)}
+                      disabled={busy || !position || position.staked === BigInt(0)}
                       onClick={() => write("withdrawAll", [address!])}
                     >
                       Withdraw All
@@ -281,7 +278,7 @@ export function VaultCard({ info }: { info: VaultInfo }) {
 
                   {/* Partial withdraw */}
                   <div className="space-y-2">
-                    <p className="text-xs text-white/50 font-medium">Withdraw Principal</p>
+                    <p className="text-xs text-white/50 font-medium">Withdraw Principal (xPHAR)</p>
                     <div className="flex flex-wrap gap-2">
                       <input
                         className="pharaoh-input text-sm"
@@ -312,10 +309,10 @@ export function VaultCard({ info }: { info: VaultInfo }) {
               {/* Non-controller: trigger auto-harvest */}
               {!isController && (
                 <>
-                  {autoEnabled && harvestDue && hasGains && (
+                  {autoEnabled && harvestDue && hasPending && (
                     <div className="space-y-2">
                       <p className="text-xs text-green-400">
-                        Auto-harvest is due — trigger it to send gains to the beneficiary.
+                        Auto-harvest is due — trigger it to send rewards to the beneficiary.
                         {gasRefundWei !== undefined && gasRefundWei > BigInt(0) && (
                           <> You earn <strong>{fmt(gasRefundWei, 18, 4)} AVAX</strong>.</>
                         )}
@@ -334,7 +331,7 @@ export function VaultCard({ info }: { info: VaultInfo }) {
                 </>
               )}
 
-              {busy  && <p className="text-gold-400 text-xs animate-pulse">{isPending ? "Confirm in wallet…" : "Confirming…"}</p>}
+              {busy     && <p className="text-gold-400 text-xs animate-pulse">{isPending ? "Confirm in wallet…" : "Confirming…"}</p>}
               {isSuccess && <p className="text-green-400 text-xs">Done.</p>}
             </div>
           )}
@@ -344,8 +341,8 @@ export function VaultCard({ info }: { info: VaultInfo }) {
             <div className="space-y-4">
               <div className="bg-gold-500/5 border border-gold-500/15 rounded-lg px-4 py-3 text-xs text-white/60 space-y-1">
                 <p className="text-white/70 font-medium">How it works</p>
-                <p>Send PHAR → vault converts to xPHAR (50% slashing penalty) → deposits into P33 auto-compounding vault → gains go to your beneficiary.</p>
-                <p className="text-gold-400/80">Example: 100 PHAR → 50 xPHAR principal deposited into P33.</p>
+                <p>Send PHAR → vault converts to xPHAR (50% slashing penalty) → stakes directly in Pharaoh&apos;s auto-voting gauge → rewards go to your beneficiary.</p>
+                <p className="text-gold-400/80">Example: 100 PHAR → 50 xPHAR staked in the auto-voting gauge.</p>
               </div>
 
               <div className="space-y-1.5">
@@ -371,7 +368,7 @@ export function VaultCard({ info }: { info: VaultInfo }) {
                 </div>
                 {pharInputWei > BigInt(0) && (
                   <p className="text-xs text-white/40">
-                    ≈ <span className="text-gold-400">{fmt(pharInputWei / 2n)} xPHAR</span> principal after 50% conversion
+                    ≈ <span className="text-gold-400">{fmt(pharInputWei / BigInt(2))} xPHAR</span> principal after 50% conversion
                   </p>
                 )}
               </div>
@@ -384,7 +381,7 @@ export function VaultCard({ info }: { info: VaultInfo }) {
                 {needsApproval ? "Approve PHAR (Step 1 / 2)" : "Deposit PHAR (Step 2 / 2)"}
               </button>
 
-              {busy    && <p className="text-gold-400 text-xs animate-pulse">{isPending ? "Confirm in wallet…" : "Confirming…"}</p>}
+              {busy     && <p className="text-gold-400 text-xs animate-pulse">{isPending ? "Confirm in wallet…" : "Confirming…"}</p>}
               {isSuccess && (
                 <p className="text-green-400 text-xs">
                   {needsApproval ? "Approved — now click Deposit PHAR." : "Deposited successfully!"}
@@ -451,10 +448,10 @@ export function VaultCard({ info }: { info: VaultInfo }) {
               {/* Chainlink hint */}
               <div className="text-xs text-white/35 space-y-0.5">
                 <p className="text-white/50 font-medium">Chainlink Automation (optional)</p>
-                <p>Register this vault at <span className="text-gold-400/70">automation.chain.link</span>. The vault's <code className="font-mono">checkUpkeep</code> / <code className="font-mono">performUpkeep</code> are already implemented.</p>
+                <p>Register this vault at <span className="text-gold-400/70">automation.chain.link</span>. The vault&apos;s <code className="font-mono">checkUpkeep</code> / <code className="font-mono">performUpkeep</code> are already implemented.</p>
               </div>
 
-              {busy    && <p className="text-gold-400 text-xs animate-pulse">{isPending ? "Confirm in wallet…" : "Confirming…"}</p>}
+              {busy     && <p className="text-gold-400 text-xs animate-pulse">{isPending ? "Confirm in wallet…" : "Confirming…"}</p>}
               {isSuccess && <p className="text-green-400 text-xs">Saved.</p>}
             </div>
           )}

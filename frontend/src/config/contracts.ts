@@ -1,14 +1,14 @@
 import { avalanche, avalancheFuji } from "wagmi/chains";
 
 // ── Pharaoh V3 Token Addresses (Avalanche C-Chain 43114) ──────────────────────
-export const PHAR_ADDRESS  = "0x13A466998Ce03Db73aBc2d4DF3bBD845Ed1f28E7" as const;
-export const XPHAR_ADDRESS = "0xE8164Ea89665DAb7a553e667F81F30CfDA736B9A" as const;
-// P33: Pharaoh's ERC4626 xPHAR auto-compounding vault (read from xPHAR contract)
-export const P33_ADDRESS   = "0x0000000000000000000000000000000000000000" as const; // TODO
+export const PHAR_ADDRESS    = "0x13A466998Ce03Db73aBc2d4DF3bBD845Ed1f28E7" as const;
+export const XPHAR_ADDRESS   = "0xE8164Ea89665DAb7a553e667F81F30CfDA736B9A" as const;
+// Auto-voting xPHAR staking gauge (TODO: find address on Snowscan)
+export const STAKING_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
 
 // ── Factory Address ───────────────────────────────────────────────────────────
 export const FACTORY_ADDRESS: Record<number, `0x${string}`> = {
-  [avalanche.id]:    "0x0000000000000000000000000000000000000000", // TODO: paste after deploy
+  [avalanche.id]:     "0x0000000000000000000000000000000000000000", // TODO: paste after deploy
   [avalancheFuji.id]: "0x0000000000000000000000000000000000000000",
 };
 
@@ -85,11 +85,11 @@ export const FACTORY_ABI = [
   {
     anonymous: false,
     inputs: [
-      { indexed: true,  name: "vaultId",       type: "uint256" },
-      { indexed: true,  name: "vault",          type: "address" },
-      { indexed: true,  name: "creator",        type: "address" },
-      { indexed: false, name: "controller",     type: "address" },
-      { indexed: false, name: "yieldReceiver",  type: "address" },
+      { indexed: true,  name: "vaultId",      type: "uint256" },
+      { indexed: true,  name: "vault",         type: "address" },
+      { indexed: true,  name: "creator",       type: "address" },
+      { indexed: false, name: "controller",    type: "address" },
+      { indexed: false, name: "yieldReceiver", type: "address" },
     ],
     name: "VaultCreated",
     type: "event",
@@ -99,35 +99,33 @@ export const FACTORY_ABI = [
 // ── Vault ABI ─────────────────────────────────────────────────────────────────
 export const VAULT_ABI = [
   // ── Immutables / state ────────────────────────────────────────────────────
-  { inputs: [], name: "p33",                outputs: [{ name: "", type: "address" }],  stateMutability: "view", type: "function" },
-  { inputs: [], name: "phar",               outputs: [{ name: "", type: "address" }],  stateMutability: "view", type: "function" },
-  { inputs: [], name: "xphar",              outputs: [{ name: "", type: "address" }],  stateMutability: "view", type: "function" },
-  { inputs: [], name: "factory",            outputs: [{ name: "", type: "address" }],  stateMutability: "view", type: "function" },
-  { inputs: [], name: "creator",            outputs: [{ name: "", type: "address" }],  stateMutability: "view", type: "function" },
-  { inputs: [], name: "createdAt",          outputs: [{ name: "", type: "uint256" }],  stateMutability: "view", type: "function" },
-  { inputs: [], name: "controller",         outputs: [{ name: "", type: "address" }],  stateMutability: "view", type: "function" },
-  { inputs: [], name: "yieldReceiver",      outputs: [{ name: "", type: "address" }],  stateMutability: "view", type: "function" },
-  { inputs: [], name: "principal",          outputs: [{ name: "", type: "uint256" }],  stateMutability: "view", type: "function" },
-  { inputs: [], name: "autoHarvestEnabled", outputs: [{ name: "", type: "bool" }],     stateMutability: "view", type: "function" },
-  { inputs: [], name: "harvestInterval",    outputs: [{ name: "", type: "uint256" }],  stateMutability: "view", type: "function" },
-  { inputs: [], name: "lastHarvestAt",      outputs: [{ name: "", type: "uint256" }],  stateMutability: "view", type: "function" },
-  { inputs: [], name: "gasRefund",          outputs: [{ name: "", type: "uint256" }],  stateMutability: "view", type: "function" },
+  { inputs: [], name: "staking",            outputs: [{ name: "", type: "address" }], stateMutability: "view", type: "function" },
+  { inputs: [], name: "phar",               outputs: [{ name: "", type: "address" }], stateMutability: "view", type: "function" },
+  { inputs: [], name: "xphar",              outputs: [{ name: "", type: "address" }], stateMutability: "view", type: "function" },
+  { inputs: [], name: "factory",            outputs: [{ name: "", type: "address" }], stateMutability: "view", type: "function" },
+  { inputs: [], name: "creator",            outputs: [{ name: "", type: "address" }], stateMutability: "view", type: "function" },
+  { inputs: [], name: "createdAt",          outputs: [{ name: "", type: "uint256" }], stateMutability: "view", type: "function" },
+  { inputs: [], name: "controller",         outputs: [{ name: "", type: "address" }], stateMutability: "view", type: "function" },
+  { inputs: [], name: "yieldReceiver",      outputs: [{ name: "", type: "address" }], stateMutability: "view", type: "function" },
+  { inputs: [], name: "principal",          outputs: [{ name: "", type: "uint256" }], stateMutability: "view", type: "function" },
+  { inputs: [], name: "autoHarvestEnabled", outputs: [{ name: "", type: "bool"    }], stateMutability: "view", type: "function" },
+  { inputs: [], name: "harvestInterval",    outputs: [{ name: "", type: "uint256" }], stateMutability: "view", type: "function" },
+  { inputs: [], name: "lastHarvestAt",      outputs: [{ name: "", type: "uint256" }], stateMutability: "view", type: "function" },
+  { inputs: [], name: "gasRefund",          outputs: [{ name: "", type: "uint256" }], stateMutability: "view", type: "function" },
 
   // ── View functions ────────────────────────────────────────────────────────
-  { inputs: [], name: "currentValue",   outputs: [{ name: "", type: "uint256" }], stateMutability: "view", type: "function" },
-  { inputs: [], name: "pendingGains",   outputs: [{ name: "", type: "uint256" }], stateMutability: "view", type: "function" },
-  { inputs: [], name: "p33Balance",     outputs: [{ name: "", type: "uint256" }], stateMutability: "view", type: "function" },
-  { inputs: [], name: "avaxBalance",    outputs: [{ name: "", type: "uint256" }], stateMutability: "view", type: "function" },
-  { inputs: [], name: "nextHarvestAt",  outputs: [{ name: "", type: "uint256" }], stateMutability: "view", type: "function" },
+  { inputs: [], name: "stakedBalance", outputs: [{ name: "", type: "uint256" }], stateMutability: "view", type: "function" },
+  { inputs: [], name: "pendingGains",  outputs: [{ name: "", type: "uint256" }], stateMutability: "view", type: "function" },
+  { inputs: [], name: "avaxBalance",   outputs: [{ name: "", type: "uint256" }], stateMutability: "view", type: "function" },
+  { inputs: [], name: "nextHarvestAt", outputs: [{ name: "", type: "uint256" }], stateMutability: "view", type: "function" },
   {
     inputs: [],
     name: "positionSummary",
     outputs: [
-      { name: "shares", type: "uint256" },
-      { name: "value",  type: "uint256" },
-      { name: "cost",   type: "uint256" },
-      { name: "gains",  type: "uint256" },
-      { name: "ratio",  type: "uint256" },
+      { name: "staked",     type: "uint256" },
+      { name: "pending",    type: "uint256" },
+      { name: "cost",       type: "uint256" },
+      { name: "rewardTok",  type: "address" },
     ],
     stateMutability: "view",
     type: "function",
@@ -141,20 +139,20 @@ export const VAULT_ABI = [
   },
 
   // ── Deposits ──────────────────────────────────────────────────────────────
-  { inputs: [{ name: "pharAmount", type: "uint256" }], name: "depositPhar", outputs: [], stateMutability: "nonpayable", type: "function" },
-  { inputs: [{ name: "shares",     type: "uint256" }], name: "depositP33",  outputs: [], stateMutability: "nonpayable", type: "function" },
+  { inputs: [{ name: "pharAmount", type: "uint256" }], name: "depositPhar",  outputs: [], stateMutability: "nonpayable", type: "function" },
+  { inputs: [{ name: "amount",     type: "uint256" }], name: "depositXPhar", outputs: [], stateMutability: "nonpayable", type: "function" },
 
   // ── Harvesting ────────────────────────────────────────────────────────────
-  { inputs: [],                      name: "harvestGains",     outputs: [], stateMutability: "nonpayable", type: "function" },
-  { inputs: [],                      name: "autoHarvestGains", outputs: [], stateMutability: "nonpayable", type: "function" },
-  { inputs: [{ name: "", type: "bytes" }], name: "performUpkeep", outputs: [], stateMutability: "nonpayable", type: "function" },
+  { inputs: [],                             name: "harvestGains",     outputs: [], stateMutability: "nonpayable", type: "function" },
+  { inputs: [],                             name: "autoHarvestGains", outputs: [], stateMutability: "nonpayable", type: "function" },
+  { inputs: [{ name: "", type: "bytes" }],  name: "performUpkeep",    outputs: [], stateMutability: "nonpayable", type: "function" },
 
   // ── Principal management ──────────────────────────────────────────────────
   { inputs: [{ name: "xpharAmount", type: "uint256" }, { name: "to", type: "address" }], name: "withdrawPrincipal", outputs: [], stateMutability: "nonpayable", type: "function" },
   { inputs: [{ name: "to", type: "address" }], name: "withdrawAll", outputs: [], stateMutability: "nonpayable", type: "function" },
 
   // ── Auto-harvest config ───────────────────────────────────────────────────
-  { inputs: [{ name: "enabled",  type: "bool" }],    name: "setAutoHarvestEnabled", outputs: [], stateMutability: "nonpayable", type: "function" },
+  { inputs: [{ name: "enabled",  type: "bool"    }], name: "setAutoHarvestEnabled", outputs: [], stateMutability: "nonpayable", type: "function" },
   { inputs: [{ name: "interval", type: "uint256" }], name: "setHarvestInterval",    outputs: [], stateMutability: "nonpayable", type: "function" },
   { inputs: [{ name: "amount",   type: "uint256" }], name: "setGasRefund",          outputs: [], stateMutability: "nonpayable", type: "function" },
   { inputs: [{ name: "amount",   type: "uint256" }, { name: "to", type: "address" }], name: "withdrawAvax", outputs: [], stateMutability: "nonpayable", type: "function" },
@@ -165,12 +163,12 @@ export const VAULT_ABI = [
   { inputs: [{ name: "token", type: "address" }, { name: "amount", type: "uint256" }, { name: "to", type: "address" }], name: "rescueToken", outputs: [], stateMutability: "nonpayable", type: "function" },
 
   // ── Events ────────────────────────────────────────────────────────────────
-  { anonymous: false, inputs: [{ indexed: false, name: "p33Shares", type: "uint256" }, { indexed: false, name: "xpharPrincipal", type: "uint256" }, { indexed: false, name: "totalPrincipal", type: "uint256" }], name: "Deposited",        type: "event" },
-  { anonymous: false, inputs: [{ indexed: false, name: "xpharGain", type: "uint256" }, { indexed: true,  name: "receiver",       type: "address"  }], name: "GainsHarvested",  type: "event" },
-  { anonymous: false, inputs: [{ indexed: false, name: "xpharAmount", type: "uint256" }, { indexed: true, name: "to", type: "address" }], name: "PrincipalWithdrawn", type: "event" },
-  { anonymous: false, inputs: [{ indexed: true,  name: "executor",    type: "address"  }, { indexed: false, name: "refundPaid", type: "uint256" }], name: "AutoHarvested",   type: "event" },
-  { anonymous: false, inputs: [{ indexed: true,  name: "oldController", type: "address" }, { indexed: true, name: "newController", type: "address" }], name: "ControllerChanged",     type: "event" },
-  { anonymous: false, inputs: [{ indexed: true,  name: "oldReceiver",   type: "address" }, { indexed: true, name: "newReceiver",   type: "address" }], name: "YieldReceiverChanged", type: "event" },
+  { anonymous: false, inputs: [{ indexed: false, name: "xpharStaked",    type: "uint256" }, { indexed: false, name: "xpharPrincipal", type: "uint256" }, { indexed: false, name: "totalPrincipal", type: "uint256" }], name: "Deposited",         type: "event" },
+  { anonymous: false, inputs: [{ indexed: false, name: "rewardAmount",   type: "uint256" }, { indexed: true,  name: "rewardToken",    type: "address"  }, { indexed: true, name: "receiver", type: "address" }],        name: "GainsHarvested",   type: "event" },
+  { anonymous: false, inputs: [{ indexed: false, name: "xpharAmount",    type: "uint256" }, { indexed: true,  name: "to",             type: "address"  }], name: "PrincipalWithdrawn", type: "event" },
+  { anonymous: false, inputs: [{ indexed: true,  name: "executor",       type: "address" }, { indexed: false, name: "refundPaid",     type: "uint256"  }], name: "AutoHarvested",      type: "event" },
+  { anonymous: false, inputs: [{ indexed: true,  name: "oldController",  type: "address" }, { indexed: true,  name: "newController",  type: "address"  }], name: "ControllerChanged",     type: "event" },
+  { anonymous: false, inputs: [{ indexed: true,  name: "oldReceiver",    type: "address" }, { indexed: true,  name: "newReceiver",    type: "address"  }], name: "YieldReceiverChanged",  type: "event" },
 ] as const;
 
 // ── ERC20 ABI (for PHAR approve/balance/allowance reads) ─────────────────────

@@ -10,21 +10,25 @@ describe("XPharVault + XPharVaultFactory", function () {
 
     const MockERC20 = await hre.ethers.getContractFactory("MockERC20");
     const phar = await MockERC20.deploy("PHAR", "PHAR", 18);
+    const rewardToken = await MockERC20.deploy("REWARD", "RWD", 18);
 
     const MockXPhar = await hre.ethers.getContractFactory("MockXPhar");
     const xphar = await MockXPhar.deploy(await phar.getAddress());
 
-    const MockP33 = await hre.ethers.getContractFactory("MockP33");
-    const p33 = await MockP33.deploy(await xphar.getAddress());
+    const MockXPharStaking = await hre.ethers.getContractFactory("MockXPharStaking");
+    const staking = await MockXPharStaking.deploy(
+      await xphar.getAddress(),
+      await rewardToken.getAddress()
+    );
 
     const Factory = await hre.ethers.getContractFactory("XPharVaultFactory");
     const factory = await Factory.deploy(
-      await p33.getAddress(),
+      await staking.getAddress(),
       await phar.getAddress(),
       await xphar.getAddress()
     );
 
-    return { factory, phar, xphar, p33, deployer, controller, yieldReceiver, other };
+    return { factory, phar, xphar, staking, rewardToken, deployer, controller, yieldReceiver, other };
   }
 
   async function vaultFixture() {
@@ -39,37 +43,28 @@ describe("XPharVault + XPharVaultFactory", function () {
   }
 
   // Helper: mint PHAR, approve vault, call depositPhar
-  async function depositPharToVault(
-    phar: any, vault: any, signer: any, pharAmount: bigint
-  ) {
+  async function depositPharToVault(phar: any, vault: any, signer: any, pharAmount: bigint) {
     await phar.mint(signer.address, pharAmount);
     await phar.connect(signer).approve(await vault.getAddress(), pharAmount);
     await vault.connect(signer).depositPhar(pharAmount);
   }
 
-  // Helper: back P33 with extra xPHAR to cover a new ratio (simulates yield).
-  //   extraXphar = xPHAR to add to P33's balance
-  //   newRatio   = new xPHAR-per-share ratio (e.g. 1.1e18 = 10% gain)
-  async function simulateYield(
-    phar: any, xphar: any, p33: any,
-    extraXphar: bigint, newRatio: bigint
+  // Helper: fund the staking mock with reward tokens and set earned for vault
+  async function simulateRewards(
+    rewardToken: any, staking: any, vault: any,
+    rewardAmount: bigint
   ) {
     const [deployer] = await hre.ethers.getSigners();
-    const pharNeeded = extraXphar * 2n; // 50% penalty reversal
-    await phar.mint(deployer.address, pharNeeded);
-    await phar.connect(deployer).approve(await xphar.getAddress(), pharNeeded);
-    await xphar.connect(deployer).convertEmissionsToken(pharNeeded);
-    // deployer now holds extraXphar xPHAR — send it to p33 as yield backing
-    await xphar.connect(deployer).transfer(await p33.getAddress(), extraXphar);
-    await p33.setRatio(newRatio);
+    await rewardToken.mint(await staking.getAddress(), rewardAmount);
+    await staking.setEarned(await vault.getAddress(), rewardAmount);
   }
 
   // ── Factory ──────────────────────────────────────────────────────────────────
 
   describe("Factory", function () {
     it("stores protocol addresses", async function () {
-      const { factory, p33, phar, xphar } = await loadFixture(deployFixture);
-      expect(await factory.p33()).to.equal(await p33.getAddress());
+      const { factory, staking, phar, xphar } = await loadFixture(deployFixture);
+      expect(await factory.staking()).to.equal(await staking.getAddress());
       expect(await factory.phar()).to.equal(await phar.getAddress());
       expect(await factory.xphar()).to.equal(await xphar.getAddress());
     });
@@ -96,12 +91,12 @@ describe("XPharVault + XPharVaultFactory", function () {
 
   describe("Vault – initial state", function () {
     it("has correct addresses and defaults", async function () {
-      const { vault, controller, yieldReceiver, deployer, p33, phar, xphar } =
+      const { vault, controller, yieldReceiver, deployer, staking, phar, xphar } =
         await loadFixture(vaultFixture);
       expect(await vault.controller()).to.equal(controller.address);
       expect(await vault.yieldReceiver()).to.equal(yieldReceiver.address);
       expect(await vault.creator()).to.equal(deployer.address);
-      expect(await vault.p33()).to.equal(await p33.getAddress());
+      expect(await vault.staking()).to.equal(await staking.getAddress());
       expect(await vault.phar()).to.equal(await phar.getAddress());
       expect(await vault.xphar()).to.equal(await xphar.getAddress());
       expect(await vault.autoHarvestEnabled()).to.equal(false);
@@ -114,12 +109,14 @@ describe("XPharVault + XPharVaultFactory", function () {
   // ── depositPhar ──────────────────────────────────────────────────────────────
 
   describe("Vault – depositPhar", function () {
-    it("converts PHAR→xPHAR (50% penalty)→P33 and records xPHAR as principal", async function () {
-      const { vault, phar, controller } = await loadFixture(vaultFixture);
-      // 100 PHAR → 50 xPHAR (50% penalty) → 50 P33 shares at ratio 1:1
+    it("converts PHAR→xPHAR (50% penalty) and stakes, recording xPHAR as principal", async function () {
+      const { vault, phar, staking, controller } = await loadFixture(vaultFixture);
+      // 100 PHAR → 50 xPHAR (50% penalty) → staked in gauge
       await depositPharToVault(phar, vault, controller, hre.ethers.parseEther("100"));
       expect(await vault.principal()).to.equal(hre.ethers.parseEther("50"));
-      expect(await vault.p33Balance()).to.equal(hre.ethers.parseEther("50"));
+      expect(await vault.stakedBalance()).to.equal(hre.ethers.parseEther("50"));
+      expect(await staking.balanceOf(await vault.getAddress()))
+        .to.equal(hre.ethers.parseEther("50"));
     });
 
     it("accumulates principal across multiple deposits", async function () {
@@ -139,7 +136,6 @@ describe("XPharVault + XPharVaultFactory", function () {
     it("reverts if caller has not approved PHAR", async function () {
       const { vault, phar, controller } = await loadFixture(vaultFixture);
       await phar.mint(controller.address, hre.ethers.parseEther("10"));
-      // no approve — should revert
       await expect(vault.connect(controller).depositPhar(hre.ethers.parseEther("10")))
         .to.be.reverted;
     });
@@ -153,31 +149,65 @@ describe("XPharVault + XPharVaultFactory", function () {
     });
   });
 
+  // ── depositXPhar ─────────────────────────────────────────────────────────────
+
+  describe("Vault – depositXPhar", function () {
+    it("stakes xPHAR directly and records principal", async function () {
+      const { vault, phar, xphar, controller } = await loadFixture(vaultFixture);
+      // mint xPHAR directly by converting PHAR (deployer converts, controller receives)
+      const [deployer] = await hre.ethers.getSigners();
+      await phar.mint(deployer.address, hre.ethers.parseEther("200"));
+      await phar.approve(await xphar.getAddress(), hre.ethers.parseEther("200"));
+      await xphar.convertEmissionsToken(hre.ethers.parseEther("200")); // → 100 xPHAR
+      await (xphar as any).transfer(controller.address, hre.ethers.parseEther("100"));
+
+      await (xphar as any).connect(controller).approve(await vault.getAddress(), hre.ethers.parseEther("100"));
+      await vault.connect(controller).depositXPhar(hre.ethers.parseEther("100"));
+
+      expect(await vault.principal()).to.equal(hre.ethers.parseEther("100"));
+      expect(await vault.stakedBalance()).to.equal(hre.ethers.parseEther("100"));
+    });
+
+    it("reverts with zero amount", async function () {
+      const { vault, controller } = await loadFixture(vaultFixture);
+      await expect(vault.connect(controller).depositXPhar(0))
+        .to.be.revertedWithCustomError(vault, "ZeroAmount");
+    });
+  });
+
   // ── Gain harvesting ──────────────────────────────────────────────────────────
 
   describe("Vault – gain harvesting", function () {
     async function gainFixture() {
       const base = await loadFixture(vaultFixture);
-      const { vault, phar, xphar, p33, controller } = base;
-      // 100 PHAR → 50 xPHAR principal → 50 P33 shares
+      const { vault, phar, rewardToken, staking, controller } = base;
       await depositPharToVault(phar, vault, controller, hre.ethers.parseEther("100"));
-      // 10% yield: 50 shares * 1.1 ratio = 55 xPHAR value, gain = 5 xPHAR
-      await simulateYield(phar, xphar, p33, hre.ethers.parseEther("5"), hre.ethers.parseEther("1.1"));
+      // simulate 5 reward tokens earned
+      await simulateRewards(rewardToken, staking, vault, hre.ethers.parseEther("5"));
       return base;
     }
 
-    it("pendingGains reflects appreciation", async function () {
+    it("pendingGains returns accrued reward tokens", async function () {
       const { vault } = await loadFixture(gainFixture);
       expect(await vault.pendingGains()).to.equal(hre.ethers.parseEther("5"));
     });
 
-    it("harvestGains sends xPHAR to yieldReceiver and zeroes gains", async function () {
-      const { vault, xphar, yieldReceiver, controller } = await loadFixture(gainFixture);
-      const before = await xphar.balanceOf(yieldReceiver.address);
+    it("harvestGains sends reward tokens to yieldReceiver", async function () {
+      const { vault, rewardToken, yieldReceiver, controller } = await loadFixture(gainFixture);
+      const before = await rewardToken.balanceOf(yieldReceiver.address);
       await vault.connect(controller).harvestGains();
-      const after = await xphar.balanceOf(yieldReceiver.address);
+      const after = await rewardToken.balanceOf(yieldReceiver.address);
       expect(after - before).to.equal(hre.ethers.parseEther("5"));
       expect(await vault.pendingGains()).to.equal(0);
+    });
+
+    it("principal (staked xPHAR) is unchanged after harvest", async function () {
+      const { vault, controller } = await loadFixture(gainFixture);
+      const principalBefore = await vault.principal();
+      const stakedBefore = await vault.stakedBalance();
+      await vault.connect(controller).harvestGains();
+      expect(await vault.principal()).to.equal(principalBefore);
+      expect(await vault.stakedBalance()).to.equal(stakedBefore);
     });
 
     it("reverts when there are no gains", async function () {
@@ -199,9 +229,9 @@ describe("XPharVault + XPharVaultFactory", function () {
   describe("Vault – auto-harvest", function () {
     async function autoFixture() {
       const base = await loadFixture(vaultFixture);
-      const { vault, phar, xphar, p33, controller } = base;
+      const { vault, phar, rewardToken, staking, controller } = base;
       await depositPharToVault(phar, vault, controller, hre.ethers.parseEther("100"));
-      await simulateYield(phar, xphar, p33, hre.ethers.parseEther("5"), hre.ethers.parseEther("1.1"));
+      await simulateRewards(rewardToken, staking, vault, hre.ethers.parseEther("5"));
       await controller.sendTransaction({
         to: await vault.getAddress(),
         value: hre.ethers.parseEther("1"),
@@ -222,11 +252,11 @@ describe("XPharVault + XPharVaultFactory", function () {
         .to.be.revertedWithCustomError(vault, "TooEarly");
     });
 
-    it("executes after interval and sends gains to yieldReceiver", async function () {
-      const { vault, xphar, yieldReceiver, other } = await loadFixture(autoFixture);
+    it("executes after interval and sends rewards to yieldReceiver", async function () {
+      const { vault, rewardToken, yieldReceiver, other } = await loadFixture(autoFixture);
       await time.increase(30 * 24 * 3600);
       await vault.connect(other).autoHarvestGains();
-      expect(await xphar.balanceOf(yieldReceiver.address))
+      expect(await rewardToken.balanceOf(yieldReceiver.address))
         .to.equal(hre.ethers.parseEther("5"));
     });
 
@@ -246,10 +276,10 @@ describe("XPharVault + XPharVaultFactory", function () {
     });
 
     it("performUpkeep harvests via Chainlink path", async function () {
-      const { vault, xphar, yieldReceiver, other } = await loadFixture(autoFixture);
+      const { vault, rewardToken, yieldReceiver, other } = await loadFixture(autoFixture);
       await time.increase(30 * 24 * 3600);
       await vault.connect(other).performUpkeep("0x");
-      expect(await xphar.balanceOf(yieldReceiver.address))
+      expect(await rewardToken.balanceOf(yieldReceiver.address))
         .to.equal(hre.ethers.parseEther("5"));
     });
   });
@@ -259,32 +289,32 @@ describe("XPharVault + XPharVaultFactory", function () {
   describe("Vault – principal management", function () {
     async function principalFixture() {
       const base = await loadFixture(vaultFixture);
-      const { vault, phar, xphar, p33, controller } = base;
+      const { vault, phar, controller } = base;
+      // 100 PHAR → 50 xPHAR staked
       await depositPharToVault(phar, vault, controller, hre.ethers.parseEther("100"));
-      await simulateYield(phar, xphar, p33, hre.ethers.parseEther("5"), hre.ethers.parseEther("1.1"));
       return base;
     }
 
-    it("withdrawPrincipal sends xPHAR and reduces principal", async function () {
+    it("withdrawPrincipal unstakes xPHAR and reduces principal", async function () {
       const { vault, xphar, controller } = await loadFixture(principalFixture);
-      const before = await xphar.balanceOf(controller.address);
+      const before = await (xphar as any).balanceOf(controller.address);
       await vault.connect(controller).withdrawPrincipal(
         hre.ethers.parseEther("25"), controller.address
       );
-      const after = await xphar.balanceOf(controller.address);
+      const after = await (xphar as any).balanceOf(controller.address);
       expect(after - before).to.equal(hre.ethers.parseEther("25"));
       expect(await vault.principal()).to.equal(hre.ethers.parseEther("25"));
+      expect(await vault.stakedBalance()).to.equal(hre.ethers.parseEther("25"));
     });
 
-    it("withdrawAll redeems all P33 shares and resets principal", async function () {
+    it("withdrawAll unstakes all xPHAR and resets principal", async function () {
       const { vault, xphar, controller } = await loadFixture(principalFixture);
-      const before = await xphar.balanceOf(controller.address);
+      const before = await (xphar as any).balanceOf(controller.address);
       await vault.connect(controller).withdrawAll(controller.address);
-      const after = await xphar.balanceOf(controller.address);
-      // 50 shares * 1.1 ratio = 55 xPHAR
-      expect(after - before).to.equal(hre.ethers.parseEther("55"));
+      const after = await (xphar as any).balanceOf(controller.address);
+      expect(after - before).to.equal(hre.ethers.parseEther("50"));
       expect(await vault.principal()).to.equal(0);
-      expect(await vault.p33Balance()).to.equal(0);
+      expect(await vault.stakedBalance()).to.equal(0);
     });
 
     it("non-controller cannot withdrawPrincipal", async function () {
@@ -332,15 +362,15 @@ describe("XPharVault + XPharVaultFactory", function () {
         .to.be.revertedWithCustomError(vault, "IntervalTooShort");
     });
 
-    it("positionSummary returns correct data after deposit", async function () {
-      const { vault, phar, controller } = await loadFixture(vaultFixture);
+    it("positionSummary returns staked, pending, cost, rewardToken", async function () {
+      const { vault, phar, rewardToken, staking, controller } = await loadFixture(vaultFixture);
       await depositPharToVault(phar, vault, controller, hre.ethers.parseEther("100"));
-      const [shares, value, cost, gains, ratio] = await vault.positionSummary();
-      expect(shares).to.equal(hre.ethers.parseEther("50"));
-      expect(value).to.equal(hre.ethers.parseEther("50"));
+      await simulateRewards(rewardToken, staking, vault, hre.ethers.parseEther("3"));
+      const [staked, pending, cost, rwdTok] = await vault.positionSummary();
+      expect(staked).to.equal(hre.ethers.parseEther("50"));
       expect(cost).to.equal(hre.ethers.parseEther("50"));
-      expect(gains).to.equal(0n);
-      expect(ratio).to.equal(hre.ethers.parseEther("1"));
+      expect(pending).to.equal(hre.ethers.parseEther("3"));
+      expect(rwdTok).to.equal(await rewardToken.getAddress());
     });
   });
 });
